@@ -4,9 +4,11 @@ import json
 import logging
 from typing import Optional, List
 import httpx
-from fastapi import APIRouter, File, UploadFile, HTTPException, status
+from fastapi import APIRouter, File, UploadFile, HTTPException, status, Depends
+from sqlalchemy.orm import Session
 from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse
-from app.database import supabase
+from app.models.db_models import Product, PriceEntry
+from app.database import get_db
 
 logger = logging.getLogger("rakoon_backend.scan")
 
@@ -249,7 +251,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
 
 
 @router.post("/confirm", response_model=ConfirmResponse, status_code=status.HTTP_201_CREATED)
-def confirm_scan_results(request_data: ConfirmRequest):
+def confirm_scan_results(request_data: ConfirmRequest, db: Session = Depends(get_db)):
     """
     Menyimpan hasil scan produk ke database setelah dikonfirmasi atau dikoreksi oleh user di frontend.
     Jika produk belum terdaftar di tabel 'products' (berdasarkan nama case-insensitive), produk baru akan dibuat.
@@ -264,40 +266,46 @@ def confirm_scan_results(request_data: ConfirmRequest):
             clean_name = item.nama_produk.strip()
             
             # 1. Cek apakah produk dengan nama yang sama sudah ada di tabel products (case-insensitive match)
-            prod_response = supabase.table("products").select("id").ilike("nama", clean_name).execute()
+            product = db.query(Product).filter(Product.nama.ilike(clean_name)).first()
             
-            if prod_response.data and len(prod_response.data) > 0:
+            if product:
                 # Produk sudah ada, ambil product_id-nya
-                product_id = prod_response.data[0]["id"]
+                product_id = product.id
             else:
                 # Produk belum ada, buat produk baru
-                new_product_data = {
-                    "nama": clean_name,
-                    "ukuran": item.ukuran,
-                    "satuan": item.satuan,
-                    "kategori": "General" # Kategori default
-                }
-                new_prod_response = supabase.table("products").insert(new_product_data).execute()
-                if not new_prod_response.data:
-                    logger.error(f"Gagal membuat produk baru untuk nama: {clean_name}")
+                try:
+                    new_product = Product(
+                        nama=clean_name,
+                        ukuran=item.ukuran,
+                        satuan=item.satuan,
+                        kategori="General"  # Kategori default
+                    )
+                    db.add(new_product)
+                    db.commit()
+                    db.refresh(new_product)
+                    product_id = new_product.id
+                    products_created += 1
+                except Exception as ex:
+                    db.rollback()
+                    logger.error(f"Gagal membuat produk baru untuk nama {clean_name}: {str(ex)}")
                     continue
-                product_id = new_prod_response.data[0]["id"]
-                products_created += 1
                 
             # 2. Insert ke tabel price_entries untuk tiap item
-            price_entry_data = {
-                "product_id": product_id,
-                "store_id": request_data.store_id,
-                "harga": item.harga,
-                "sumber_user_id": request_data.user_id,
-                "status_verifikasi": "pending"
-            }
-            
-            price_response = supabase.table("price_entries").insert(price_entry_data).execute()
-            if price_response.data:
+            try:
+                price_entry = PriceEntry(
+                    product_id=product_id,
+                    store_id=str(request_data.store_id),
+                    harga=item.harga,
+                    sumber_user_id=str(request_data.user_id),
+                    status_verifikasi="pending"
+                )
+                db.add(price_entry)
+                db.commit()
+                db.refresh(price_entry)
                 items_saved += 1
-            else:
-                logger.error(f"Gagal menyimpan harga untuk product_id: {product_id}")
+            except Exception as ex:
+                db.rollback()
+                logger.error(f"Gagal menyimpan harga untuk product_id {product_id}: {str(ex)}")
                 
         message = f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru."
         return ConfirmResponse(
@@ -307,6 +315,7 @@ def confirm_scan_results(request_data: ConfirmRequest):
         )
         
     except Exception as e:
+        db.rollback()
         logger.error(f"Error during scan confirmation: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

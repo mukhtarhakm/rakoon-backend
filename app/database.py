@@ -1,9 +1,9 @@
 import os
 import logging
-import uuid
-from datetime import datetime
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -12,25 +12,11 @@ logger = logging.getLogger("rakoon_backend")
 # Load environment variables
 load_dotenv(override=True)
 
+# ======================================================================================
+# SUPABASE CLIENT SETUP (For transition and legacy support if needed)
+# ======================================================================================
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-
-if not supabase_url:
-    raise RuntimeError("Error: SUPABASE_URL environment variable is missing from .env")
-if not supabase_key:
-    raise RuntimeError("Error: SUPABASE_SERVICE_KEY environment variable is missing from .env")
-
-# ======================================================================================
-# KOMENTAR PENTING KEAMANAN:
-# SUPABASE_SERVICE_KEY (service_role key) ini HANYA untuk penggunaan backend (server-side).
-# Key ini memiliki hak akses penuh (bypass Row Level Security / RLS) ke database.
-# JANGAN PERNAH mengirimkan atau menyematkan key ini di sisi client (seperti Flutter/Mobile App)!
-# Untuk sisi client, gunakan SUPABASE_ANON_KEY dengan kebijakan RLS yang sesuai.
-# ======================================================================================
-
-logger.info(f"Loaded SUPABASE_URL: {supabase_url}")
-logger.info(f"Loaded SUPABASE_SERVICE_KEY prefix: {supabase_key[:15]}... (length: {len(supabase_key) if supabase_key else 0})")
-
 
 class MockResponse:
     def __init__(self, data):
@@ -69,11 +55,11 @@ class MockQueryBuilder:
         return self
 
     def execute(self):
-        # Mock INSERT operation
+        # Mock database actions
+        from datetime import datetime
         if self.insert_data is not None:
             record = dict(self.insert_data)
             if "id" not in record:
-                # Generate integer ID or UUID string
                 record["id"] = len(self.db_store.get(self.table_name, [])) + 1
             if "timestamp" not in record:
                 record["timestamp"] = datetime.utcnow().isoformat()
@@ -85,7 +71,6 @@ class MockQueryBuilder:
             self.db_store[self.table_name].append(record)
             return MockResponse([record])
         
-        # Mock SELECT operation
         records = self.db_store.get(self.table_name, [])
         filtered_records = []
         for r in records:
@@ -100,7 +85,6 @@ class MockQueryBuilder:
                     if record_val is None or val is None:
                         match = False
                         break
-                    # Remove SQL wildcard characters from the value if any
                     clean_val = str(val).replace("%", "")
                     if str(record_val).lower() != clean_val.lower():
                         match = False
@@ -109,11 +93,8 @@ class MockQueryBuilder:
                 filtered_records.append(r)
         
         if self.order_by:
-            # Sort helper
             def sort_key(x):
-                val = x.get(self.order_by, "")
-                # handle datetime comparison strings
-                return val
+                return x.get(self.order_by, "")
             filtered_records.sort(key=sort_key, reverse=self.order_desc)
             
         return MockResponse(filtered_records)
@@ -125,26 +106,52 @@ class MockSupabaseClient:
     def table(self, table_name):
         return MockQueryBuilder(table_name, self.db_store)
 
-# Global database client placeholder
 supabase: Client
 
-try:
-    # Basic JWT format check: must have 3 segments separated by dots and start with 'eyJ'
-    parts = supabase_key.split(".")
-    if len(parts) != 3 or not supabase_key.startswith("eyJ"):
-        raise ValueError("Invalid JWT key structure")
-        
-    supabase = create_client(supabase_url, supabase_key)
-    logger.info("Successfully initialized real Supabase client.")
-except Exception as e:
-    logger.warning(
-        "\n"
-        "========================================================================\n"
-        "WARNING: SUPABASE_SERVICE_KEY in .env is not a valid JWT token!\n"
-        "Switching to an in-memory MockSupabaseClient for testing/development.\n"
-        "Please configure a valid service_role JWT key in your .env file to connect\n"
-        "to your real Supabase database.\n"
-        "========================================================================"
-    )
-    logger.warning(f"Error detail during initialization: {str(e)}")
+if supabase_url and supabase_key:
+    try:
+        parts = supabase_key.split(".")
+        if len(parts) != 3 or not supabase_key.startswith("eyJ"):
+            raise ValueError("Invalid JWT key structure")
+        supabase = create_client(supabase_url, supabase_key)
+        logger.info("Successfully initialized legacy Supabase client.")
+    except Exception as e:
+        logger.warning(f"Error initializing Supabase client: {str(e)}. Falling back to mock client.")
+        supabase = MockSupabaseClient()
+else:
+    logger.warning("Supabase credentials missing. Falling back to mock client.")
     supabase = MockSupabaseClient()
+
+
+# ======================================================================================
+# SQLALCHEMY ENGINE & SESSION SETUP
+# ======================================================================================
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Fallback to local SQLite if DATABASE_URL is not set in .env
+if not DATABASE_URL:
+    # default path to rakoon.db in the backend folder
+    DATABASE_URL = "sqlite:///./rakoon.db"
+    logger.info(f"DATABASE_URL not found in .env. Falling back to local SQLite: {DATABASE_URL}")
+else:
+    # Ensure correct format for SQLAlchemy for postgresql://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    logger.info("DATABASE_URL found. Initializing database engine.")
+
+# Set up engine arguments (connect_args is only for sqlite)
+engine_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    engine_args["connect_args"] = {"check_same_thread": False}
+
+engine = create_engine(DATABASE_URL, **engine_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Dependency for FastAPI Routers to inject database sessions
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
