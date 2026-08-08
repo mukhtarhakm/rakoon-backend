@@ -53,7 +53,11 @@ class MockQueryBuilder:
         return self
 
     def eq(self, column, value):
-        self.filters.append((column, value))
+        self.filters.append((column, value, "eq"))
+        return self
+
+    def ilike(self, column, value):
+        self.filters.append((column, value, "ilike"))
         return self
 
     def order(self, column, desc=False):
@@ -86,10 +90,21 @@ class MockQueryBuilder:
         filtered_records = []
         for r in records:
             match = True
-            for col, val in self.filters:
-                if str(r.get(col)) != str(val):
-                    match = False
-                    break
+            for col, val, op in self.filters:
+                record_val = r.get(col)
+                if op == "eq":
+                    if str(record_val) != str(val):
+                        match = False
+                        break
+                elif op == "ilike":
+                    if record_val is None or val is None:
+                        match = False
+                        break
+                    # Remove SQL wildcard characters from the value if any
+                    clean_val = str(val).replace("%", "")
+                    if str(record_val).lower() != clean_val.lower():
+                        match = False
+                        break
             if match:
                 filtered_records.append(r)
         
