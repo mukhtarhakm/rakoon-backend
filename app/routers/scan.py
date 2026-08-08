@@ -72,6 +72,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="File foto yang diunggah kosong."
             )
+        logger.info(f"Received file '{file.filename}' ({len(contents)} bytes) for scanning.")
     except HTTPException:
         raise
     except Exception as e:
@@ -95,6 +96,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
 
     # 3. Encode image ke Base64
     try:
+        logger.info("Encoding image to Base64...")
         base64_image = base64.b64encode(contents).decode("utf-8")
     except Exception as e:
         logger.error(f"Error encoding image to base64: {str(e)}")
@@ -149,8 +151,11 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
     }
 
     try:
+        logger.info(f"Sending request to Groq API using model '{groq_model}'...")
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, headers=headers, json=payload)
+            
+        logger.info(f"Groq API responded with status code {response.status_code}")
             
         if response.status_code != 200:
             logger.error(f"Groq API returned error {response.status_code}: {response.text}")
@@ -200,6 +205,8 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
             detected_items = parsed_json
         else:
             detected_items = []
+            
+    logger.info(f"Parsed AI response successfully. Detected {len(detected_items)} items on shelf.")
 
     if not detected_items:
         return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
