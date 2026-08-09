@@ -40,3 +40,40 @@ class ConfirmResponse(BaseModel):
     items_saved: int = Field(..., description="Jumlah entri harga yang berhasil disimpan")
     products_created: int = Field(..., description="Jumlah produk baru yang berhasil dibuat")
     message: str = Field(..., description="Pesan status konfirmasi")
+
+
+# ---------------------------------------------------------------------------
+# F3 — Price History Schemas
+# ---------------------------------------------------------------------------
+
+class PriceHistoryItem(BaseModel):
+    """Satu baris riwayat harga dari tabel price_entries."""
+
+    id: int = Field(..., description="ID entri harga")
+    product_id: int = Field(..., description="ID produk")
+    store_id: str = Field(..., description="ID toko tempat harga dicatat")
+    harga: int = Field(..., description="Harga produk (satuan: Rupiah)")
+    sumber_user_id: str = Field(..., description="ID user yang menginput harga")
+    # ORM column name is `timestamp`; exposed publicly as `recorded_at`
+    recorded_at: datetime = Field(..., alias="timestamp", description="Waktu harga dicatat")
+    status_verifikasi: str = Field(..., description="Status verifikasi entri ('pending' / 'verified')")
+
+    model_config = {"from_attributes": True, "populate_by_name": True}
+
+
+
+class PriceHistoryResponse(BaseModel):
+    """Response wrapper untuk daftar riwayat harga satu produk."""
+
+    product_id: int = Field(..., description="ID produk yang diminta")
+    total: int = Field(..., description="Jumlah total entri yang dikembalikan")
+    items: List[PriceHistoryItem] = Field(default_factory=list, description="Daftar entri riwayat harga")
+
+
+class PriceTrendPoint(BaseModel):
+    """Satu titik data untuk grafik tren harga."""
+
+    date: str = Field(..., description="Tanggal dalam format YYYY-MM-DD")
+    store_id: str = Field(..., description="ID toko")
+    price: int = Field(..., description="Harga (atau rata-rata harga jika ada beberapa entri pada hari yang sama)")
+
