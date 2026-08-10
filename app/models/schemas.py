@@ -1,15 +1,16 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional, Union, List
+from uuid import UUID
 
 class PriceEntryCreate(BaseModel):
-    product_id: Union[int, str] = Field(..., description="ID of the product")
-    store_id: Union[int, str] = Field(..., description="ID of the store")
+    product_id: Union[UUID, int, str] = Field(..., description="ID of the product")
+    store_id: Union[UUID, int, str] = Field(..., description="ID of the store")
     harga: int = Field(..., description="Price value of the product at the store")
-    sumber_user_id: Union[int, str] = Field(..., description="ID of the user submitting the price")
+    sumber_user_id: Union[UUID, int, str] = Field(..., description="ID of the user submitting the price")
 
 class PriceEntryOut(PriceEntryCreate):
-    id: Union[int, str] = Field(..., description="ID of the price entry")
+    id: Union[UUID, int, str] = Field(..., description="ID of the price entry")
     timestamp: datetime = Field(..., description="Timestamp of when the price entry was created")
     status_verifikasi: str = Field(..., description="Verification status of the price entry (e.g., 'pending')")
 
@@ -32,8 +33,8 @@ class ConfirmItem(BaseModel):
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (nullable)")
 
 class ConfirmRequest(BaseModel):
-    store_id: Union[int, str] = Field(..., description="ID dari toko tempat scan dilakukan")
-    user_id: Union[int, str] = Field(..., description="ID dari pengguna yang melakukan konfirmasi")
+    store_id: Union[UUID, int, str] = Field(..., description="ID dari toko tempat scan dilakukan")
+    user_id: Union[UUID, int, str] = Field(..., description="ID dari pengguna yang melakukan konfirmasi")
     items: List[ConfirmItem] = Field(..., description="Daftar item hasil scan yang dikonfirmasi")
 
 class ConfirmResponse(BaseModel):
@@ -49,11 +50,11 @@ class ConfirmResponse(BaseModel):
 class PriceHistoryItem(BaseModel):
     """Satu baris riwayat harga dari tabel price_entries."""
 
-    id: int = Field(..., description="ID entri harga")
-    product_id: int = Field(..., description="ID produk")
-    store_id: str = Field(..., description="ID toko tempat harga dicatat")
+    id: Union[UUID, int, str] = Field(..., description="ID entri harga")
+    product_id: Union[UUID, int, str] = Field(..., description="ID produk")
+    store_id: Union[UUID, str] = Field(..., description="ID toko tempat harga dicatat")
     harga: int = Field(..., description="Harga produk (satuan: Rupiah)")
-    sumber_user_id: str = Field(..., description="ID user yang menginput harga")
+    sumber_user_id: Union[UUID, str] = Field(..., description="ID user yang menginput harga")
     # ORM column name is `timestamp`; exposed publicly as `recorded_at`
     recorded_at: datetime = Field(..., alias="timestamp", description="Waktu harga dicatat")
     status_verifikasi: str = Field(..., description="Status verifikasi entri ('pending' / 'verified')")
@@ -66,14 +67,14 @@ class PriceTrendPoint(BaseModel):
     """Satu titik data untuk grafik tren harga."""
 
     date: str = Field(..., description="Tanggal dalam format YYYY-MM-DD")
-    store_id: str = Field(..., description="ID toko")
+    store_id: Union[UUID, str] = Field(..., description="ID toko")
     price: int = Field(..., description="Harga (atau rata-rata harga jika ada beberapa entri pada hari yang sama)")
 
 
 class PriceHistoryResponse(BaseModel):
     """Response wrapper untuk daftar riwayat harga satu produk."""
 
-    product_id: int = Field(..., description="ID produk yang diminta")
+    product_id: Union[UUID, int, str] = Field(..., description="ID produk yang diminta")
     total: int = Field(..., description="Jumlah total entri yang dikembalikan")
     items: List[PriceHistoryItem] = Field(default_factory=list, description="Daftar entri riwayat harga")
     trend: List[PriceTrendPoint] = Field(default_factory=list, description="Daftar titik data grafik tren harga")

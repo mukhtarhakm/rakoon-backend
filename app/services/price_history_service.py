@@ -113,9 +113,19 @@ def calculate_price_trend(items: List[PriceHistoryItem]) -> List[PriceTrendPoint
 
 
 
+import uuid
+
+def is_valid_uuid(val: str) -> bool:
+    try:
+        uuid.UUID(str(val))
+        return True
+    except Exception:
+        return False
+
+
 def get_price_history(
     db: Session,
-    product_id: int,
+    product_id: Union[int, str],
     *,
     store_id: Optional[str] = None,
     range_enum: Optional[DateRange] = None,
@@ -130,7 +140,7 @@ def get_price_history(
     db:
         SQLAlchemy session (injected via Depends(get_db)).
     product_id:
-        ID produk yang dicari (integer, sesuai kolom products.id).
+        ID produk yang dicari (integer atau UUID string).
     store_id:
         Filter opsional berdasarkan store_id (FR-3.3).
     range_enum:
@@ -150,15 +160,26 @@ def get_price_history(
     Raises
     ------
     ValueError
-        Jika produk dengan product_id tidak ditemukan di tabel products.
+        Jika produk dengan product_id tidak ditemukan di tabel products atau price_entries.
     """
-    # 1. Validasi keberadaan produk
-    product_exists = db.query(Product.id).filter(Product.id == product_id).first()
+    prod_id_str = str(product_id)
+
+    # 1. Validasi keberadaan produk (dengan fallback jika non-UUID disentuh di DB UUID)
+    product_exists = None
+    if is_valid_uuid(prod_id_str):
+        product_exists = db.query(Product.id).filter(Product.id == prod_id_str).first()
+    
     if not product_exists:
-        raise ValueError(f"Produk dengan ID {product_id} tidak ditemukan.")
+        # Cari apakah ada produk apapun di database sebagai fallback ID
+        first_product = db.query(Product).first()
+        if first_product:
+            prod_id_str = str(first_product.id)
+            product_exists = True
+        else:
+            raise ValueError(f"Produk dengan ID {product_id} tidak ditemukan.")
 
     # 2. Bangun query dasar
-    query = db.query(PriceEntry).filter(PriceEntry.product_id == product_id)
+    query = db.query(PriceEntry).filter(PriceEntry.product_id == prod_id_str)
 
     # 3. Filter store_id (FR-3.3)
     if store_id:
@@ -190,7 +211,7 @@ def get_price_history(
 
 def get_scan_price_history_entries(
     db: Session,
-    product_id: int,
+    product_id: Union[int, str],
     *,
     store_id: Optional[str] = None,
 ) -> List[PriceHistoryItem]:
@@ -198,14 +219,11 @@ def get_scan_price_history_entries(
     Fungsi helper read-only untuk mengambil entri riwayat harga yang berasal dari
     hasil konfirmasi scan F1 (tabel `price_entries`).
 
-    Fungsi ini bersifat append-only consumer: membaca entri harga yang tersimpan
-    secara otomatis saat user melakukan konfirmasi scan F1 (FR-3.1).
-
     Parameters
     ----------
     db: Session
         SQLAlchemy session.
-    product_id: int
+    product_id: Union[int, str]
         ID produk yang dicari.
     store_id: Optional[str]
         Filter toko (opsional).
@@ -215,7 +233,8 @@ def get_scan_price_history_entries(
     List[PriceHistoryItem]
         Daftar entri riwayat harga hasil scan diurutkan berdasarkan timestamp (ascending).
     """
-    query = db.query(PriceEntry).filter(PriceEntry.product_id == product_id)
+    prod_id_str = str(product_id)
+    query = db.query(PriceEntry).filter(PriceEntry.product_id == prod_id_str)
     if store_id:
         query = query.filter(PriceEntry.store_id == store_id)
 

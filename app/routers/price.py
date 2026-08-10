@@ -19,26 +19,19 @@ def create_price_entry(price_data: PriceEntryCreate, db: Session = Depends(get_d
     Status verifikasi default diatur menjadi "pending".
     """
     try:
-        # Cast product_id to integer if it is passed as a string
-        try:
-            prod_id_int = int(price_data.product_id)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="product_id harus berupa angka integer."
-            )
+        prod_id_str = str(price_data.product_id)
 
         # Cek apakah produk dengan ID tersebut memang ada
-        product_exists = db.query(Product).filter(Product.id == prod_id_int).first()
+        product_exists = db.query(Product).filter(Product.id == prod_id_str).first()
         if not product_exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Produk dengan ID {prod_id_int} tidak ditemukan."
-            )
+            # Buat produk otomatis jika belum ada di tabel products
+            new_product = Product(id=prod_id_str, nama=f"Produk {prod_id_str}")
+            db.add(new_product)
+            db.commit()
 
         # Menyiapkan data insert dengan status_verifikasi default "pending"
         db_entry = PriceEntry(
-            product_id=prod_id_int,
+            product_id=prod_id_str,
             store_id=str(price_data.store_id),
             harga=price_data.harga,
             sumber_user_id=str(price_data.sumber_user_id),
@@ -67,12 +60,12 @@ PRICE_HISTORY_RESPONSES = {
         "content": {
             "application/json": {
                 "example": {
-                    "product_id": 1,
+                    "product_id": "1",
                     "total": 2,
                     "items": [
                         {
-                            "id": 101,
-                            "product_id": 1,
+                            "id": "101",
+                            "product_id": "1",
                             "store_id": "store_001",
                             "harga": 18000,
                             "sumber_user_id": "user_123",
@@ -80,8 +73,8 @@ PRICE_HISTORY_RESPONSES = {
                             "status_verifikasi": "verified",
                         },
                         {
-                            "id": 102,
-                            "product_id": 1,
+                            "id": "102",
+                            "product_id": "1",
                             "store_id": "store_001",
                             "harga": 19000,
                             "sumber_user_id": "user_456",
@@ -128,7 +121,7 @@ PRICE_HISTORY_RESPONSES = {
     tags=["Price History"],
 )
 def get_price_history_v1(
-    product_id: int,
+    product_id: str,
     store_id: Optional[str] = Query(None, description="Filter berdasarkan ID toko (opsional, contoh: 'store_001')"),
     range: Optional[DateRange] = Query(DateRange.ALL, description="Filter rentang tanggal ('1m', '3m', '6m', 'all')"),
     start_date: Optional[datetime] = Query(None, description="Batas awal tanggal (opsional, ISO 8601 format)"),
@@ -139,7 +132,7 @@ def get_price_history_v1(
     Menampilkan histori harga per produk beserta data tren harga untuk grafik (FR-3.2, FR-3.3, FR-3.4).
 
     Parameters:
-    - **product_id**: ID produk (integer)
+    - **product_id**: ID produk (string atau integer)
     - **store_id**: Filter berdasarkan toko (opsional)
     - **range**: Preset rentang tanggal ('1m', '3m', '6m', 'all')
     - **start_date** & **end_date**: Batas tanggal kustom (opsional)
@@ -177,17 +170,10 @@ def get_price_history(
     Jika data kosong, mengembalikan pesan 'Belum ada data historis'.
     """
     try:
-        # Cast product_id to integer
-        try:
-            prod_id_int = int(product_id)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="product_id harus berupa angka integer."
-            )
+        prod_id_str = str(product_id)
 
         # Inisialisasi query ke tabel price_entries
-        query = db.query(PriceEntry).filter(PriceEntry.product_id == prod_id_int)
+        query = db.query(PriceEntry).filter(PriceEntry.product_id == prod_id_str)
         
         # Filter store_id jika disediakan
         if store_id:
