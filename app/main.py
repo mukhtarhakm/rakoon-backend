@@ -18,6 +18,7 @@ app.add_middleware(
 )
 
 # Include routers
+app.include_router(price.router)
 app.include_router(price.router, prefix="/price", tags=["price"])
 app.include_router(scan.router, prefix="/scan", tags=["scan"])
 
