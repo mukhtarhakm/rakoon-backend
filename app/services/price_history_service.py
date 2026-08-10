@@ -185,3 +185,39 @@ def get_price_history(
         trend=trend,
     )
 
+
+def get_scan_price_history_entries(
+    db: Session,
+    product_id: int,
+    *,
+    store_id: Optional[str] = None,
+) -> List[PriceHistoryItem]:
+    """
+    Fungsi helper read-only untuk mengambil entri riwayat harga yang berasal dari
+    hasil konfirmasi scan F1 (tabel `price_entries`).
+
+    Fungsi ini bersifat append-only consumer: membaca entri harga yang tersimpan
+    secara otomatis saat user melakukan konfirmasi scan F1 (FR-3.1).
+
+    Parameters
+    ----------
+    db: Session
+        SQLAlchemy session.
+    product_id: int
+        ID produk yang dicari.
+    store_id: Optional[str]
+        Filter toko (opsional).
+
+    Returns
+    -------
+    List[PriceHistoryItem]
+        Daftar entri riwayat harga hasil scan diurutkan berdasarkan timestamp (ascending).
+    """
+    query = db.query(PriceEntry).filter(PriceEntry.product_id == product_id)
+    if store_id:
+        query = query.filter(PriceEntry.store_id == store_id)
+
+    records: List[PriceEntry] = query.order_by(PriceEntry.timestamp.asc()).all()
+    return [PriceHistoryItem.model_validate(r) for r in records]
+
+
