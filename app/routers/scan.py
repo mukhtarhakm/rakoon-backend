@@ -1,6 +1,7 @@
 import os
 import base64
 import json
+import re
 import logging
 from typing import Optional, List
 import httpx
@@ -33,6 +34,45 @@ def clean_str(val) -> Optional[str]:
     if not val_str or val_str.lower() in ("null", "none"):
         return None
     return val_str
+
+def extract_and_parse_json(text: str) -> dict:
+    """
+    Ekstrak JSON dari teks mentah yang dihasilkan oleh LLM.
+    Mendukung format JSON bersih, JSON di dalam block markdown (```json ... ```),
+    serta membersihkan tag reasoning/thinking (<think>...</think>) jika ada.
+    """
+    cleaned = text.strip()
+    cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
+    
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+        
+    markdown_match = re.search(r'```(?:json)?\s*(.*?)\s*```', cleaned, re.DOTALL)
+    if markdown_match:
+        try:
+            return json.loads(markdown_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+            
+    first_brace = cleaned.find('{')
+    last_brace = cleaned.rfind('}')
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(cleaned[first_brace:last_brace + 1])
+        except json.JSONDecodeError:
+            pass
+            
+    first_bracket = cleaned.find('[')
+    last_bracket = cleaned.rfind(']')
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        try:
+            return json.loads(cleaned[first_bracket:last_bracket + 1])
+        except json.JSONDecodeError:
+            pass
+            
+    raise json.JSONDecodeError("Gagal mengekstrak JSON dari respon AI.", cleaned, 0)
 
 @router.post("/", response_model=ScanResponse, status_code=status.HTTP_200_OK)
 async def scan_shelf_photo(file: UploadFile = File(...)):
@@ -148,11 +188,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
                     }
                 ]
             }
-        ],
-        "response_format": {
-            "type": "json_object"
-        },
-        "reasoning_format": "hidden"
+        ]
     }
 
     try:
@@ -195,7 +231,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
             logger.warning(f"Empty content in Groq response: {groq_data}")
             return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
             
-        parsed_json = json.loads(text_content)
+        parsed_json = extract_and_parse_json(text_content)
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         logger.error(f"Failed to parse Groq JSON content: {str(e)}")
         return ScanResponse(
