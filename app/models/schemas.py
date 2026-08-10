@@ -62,18 +62,19 @@ class PriceHistoryItem(BaseModel):
 
 
 
-class PriceHistoryResponse(BaseModel):
-    """Response wrapper untuk daftar riwayat harga satu produk."""
-
-    product_id: int = Field(..., description="ID produk yang diminta")
-    total: int = Field(..., description="Jumlah total entri yang dikembalikan")
-    items: List[PriceHistoryItem] = Field(default_factory=list, description="Daftar entri riwayat harga")
-
-
 class PriceTrendPoint(BaseModel):
     """Satu titik data untuk grafik tren harga."""
 
     date: str = Field(..., description="Tanggal dalam format YYYY-MM-DD")
     store_id: str = Field(..., description="ID toko")
     price: int = Field(..., description="Harga (atau rata-rata harga jika ada beberapa entri pada hari yang sama)")
+
+
+class PriceHistoryResponse(BaseModel):
+    """Response wrapper untuk daftar riwayat harga satu produk."""
+
+    product_id: int = Field(..., description="ID produk yang diminta")
+    total: int = Field(..., description="Jumlah total entri yang dikembalikan")
+    items: List[PriceHistoryItem] = Field(default_factory=list, description="Daftar entri riwayat harga")
+    trend: List[PriceTrendPoint] = Field(default_factory=list, description="Daftar titik data grafik tren harga")
 
