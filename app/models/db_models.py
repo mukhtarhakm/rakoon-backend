@@ -23,7 +23,7 @@ class Store(Base):
 class Product(Base):
     __tablename__ = "products"
     
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id = Column(String, primary_key=True, index=True)
     nama = Column(String, unique=True, index=True, nullable=False)
     kategori = Column(String, default="General", nullable=False)
     ukuran = Column(Float, nullable=True)
@@ -36,7 +36,7 @@ class PriceEntry(Base):
     __tablename__ = "price_entries"
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    product_id = Column(String, ForeignKey("products.id"), nullable=False)
     store_id = Column(String, nullable=False)
     harga = Column(Integer, nullable=False)
     sumber_user_id = Column(String, nullable=False)
