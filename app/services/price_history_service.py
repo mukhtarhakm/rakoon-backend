@@ -98,7 +98,8 @@ def calculate_price_trend(items: List[PriceHistoryItem]) -> List[PriceTrendPoint
     trend_points: List[PriceTrendPoint] = []
     sorted_keys = sorted(grouped.keys(), key=lambda k: (k[0], k[1]))
 
-    for (date_str, store_id), prices in sorted_keys:
+    for date_str, store_id in sorted_keys:
+        prices = grouped[(date_str, store_id)]
         avg_price = int(round(sum(prices) / len(prices)))
         trend_points.append(
             PriceTrendPoint(
@@ -109,6 +110,7 @@ def calculate_price_trend(items: List[PriceHistoryItem]) -> List[PriceTrendPoint
         )
 
     return trend_points
+
 
 
 def get_price_history(
