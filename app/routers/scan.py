@@ -191,6 +191,11 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
         ]
     }
 
+    # Disable thinking tokens for Qwen models to ensure fast response, low token usage, and avoid JSON format errors or timeouts
+    if "qwen" in groq_model.lower():
+        payload["reasoning_effort"] = "none"
+
+
     try:
         logger.info(f"Sending request to Groq API using model '{groq_model}'...")
         async with httpx.AsyncClient(timeout=30.0) as client:
