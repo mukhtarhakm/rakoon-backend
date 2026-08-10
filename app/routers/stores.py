@@ -153,6 +153,7 @@ async def get_nearby_stores(
         # source == "osm": Proses hasil dari Overpass API
         # Ambil toko kandidat dari database lokal untuk deduplikasi
         candidates = get_candidate_stores(db, lat, lng, radius_km)
+        new_stores_to_add = []
         
         for el in elements:
             # Ekstrak koordinat (node memiliki lat/lon secara langsung, way/relation memiliki center)
@@ -212,17 +213,10 @@ async def get_nearby_stores(
                     lat=item_lat,
                     lng=item_lng
                 )
-                try:
-                    db.add(new_store)
-                    db.commit()
-                    db.refresh(new_store)
-                    # Tambahkan ke candidates agar tidak terduplikasi pada loop data berikutnya
-                    candidates.append(new_store)
-                except Exception as ex:
-                    db.rollback()
-                    logger.error(f"Failed to auto-create store from OSM: {str(ex)}")
-                    # Skip jika gagal menyimpan ke database (agar user tidak terganggu error 500)
-                    continue
+                db.add(new_store)
+                # Tambahkan ke candidates agar tidak terduplikasi pada loop data berikutnya
+                candidates.append(new_store)
+                new_stores_to_add.append(new_store)
                     
             results.append(
                 NearbyStoreItem(
@@ -233,6 +227,14 @@ async def get_nearby_stores(
                     jarak_km=dist
                 )
             )
+            
+        if new_stores_to_add:
+            try:
+                db.commit()
+                logger.info(f"Successfully auto-created {len(new_stores_to_add)} stores from OSM.")
+            except Exception as ex:
+                db.rollback()
+                logger.error(f"Failed to commit auto-created stores from OSM: {str(ex)}")
             
     # 4. Urutkan hasil berdasarkan jarak terdekat
     results.sort(key=lambda x: x.jarak_km)
