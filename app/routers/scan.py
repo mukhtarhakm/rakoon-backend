@@ -266,47 +266,46 @@ def confirm_scan_results(request_data: ConfirmRequest, db: Session = Depends(get
             clean_name = item.nama_produk.strip()
             
             # 1. Cek apakah produk dengan nama yang sama sudah ada di tabel products (case-insensitive match)
-            product = db.query(Product).filter(Product.nama.ilike(clean_name)).first()
+            # Cek di session's new objects terlebih dahulu untuk menghindari duplikasi dalam batch yang sama
+            product = None
+            for obj in db.new:
+                if isinstance(obj, Product) and obj.nama.lower() == clean_name.lower():
+                    product = obj
+                    break
+            
+            if not product:
+                product = db.query(Product).filter(Product.nama.ilike(clean_name)).first()
             
             if product:
                 # Produk sudah ada, ambil product_id-nya
                 product_id = product.id
             else:
                 # Produk belum ada, buat produk baru
-                try:
-                    new_product = Product(
-                        nama=clean_name,
-                        ukuran=item.ukuran,
-                        satuan=item.satuan,
-                        kategori="General"  # Kategori default
-                    )
-                    db.add(new_product)
-                    db.commit()
-                    db.refresh(new_product)
-                    product_id = new_product.id
-                    products_created += 1
-                except Exception as ex:
-                    db.rollback()
-                    logger.error(f"Gagal membuat produk baru untuk nama {clean_name}: {str(ex)}")
-                    continue
+                new_product = Product(
+                    nama=clean_name,
+                    ukuran=item.ukuran,
+                    satuan=item.satuan,
+                    kategori="General"  # Kategori default
+                )
+                db.add(new_product)
+                db.flush() # Flush untuk mendapatkan generated ID dari database
+                product_id = new_product.id
+                products_created += 1
                 
             # 2. Insert ke tabel price_entries untuk tiap item
-            try:
-                price_entry = PriceEntry(
-                    product_id=product_id,
-                    store_id=str(request_data.store_id),
-                    harga=item.harga,
-                    sumber_user_id=str(request_data.user_id),
-                    status_verifikasi="pending"
-                )
-                db.add(price_entry)
-                db.commit()
-                db.refresh(price_entry)
-                items_saved += 1
-            except Exception as ex:
-                db.rollback()
-                logger.error(f"Gagal menyimpan harga untuk product_id {product_id}: {str(ex)}")
-                
+            price_entry = PriceEntry(
+                product_id=product_id,
+                store_id=str(request_data.store_id),
+                harga=item.harga,
+                sumber_user_id=str(request_data.user_id),
+                status_verifikasi="pending"
+            )
+            db.add(price_entry)
+            items_saved += 1
+            
+        # Commit seluruh perubahan sekaligus
+        db.commit()
+        
         message = f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru."
         return ConfirmResponse(
             items_saved=items_saved,
