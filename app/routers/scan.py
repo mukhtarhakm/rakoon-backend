@@ -118,6 +118,10 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
         "model": groq_model,
         "messages": [
             {
+                "role": "system",
+                "content": "You are a helpful assistant that only outputs valid JSON. Do not include any explanation, conversational text, or markdown code blocks (like ```json). Output must be strictly valid JSON matching the requested schema."
+            },
+            {
                 "role": "user",
                 "content": [
                     {
@@ -147,7 +151,8 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
         ],
         "response_format": {
             "type": "json_object"
-        }
+        },
+        "reasoning_format": "hidden"
     }
 
     try:
