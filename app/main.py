@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import price, scan, stores, products
+from app.routers import price, scan, stores, products, recommendation
 
 app = FastAPI(
     title="Rakoon Backend",
@@ -22,6 +22,7 @@ app.include_router(price.router, prefix="/price", tags=["price"])
 app.include_router(scan.router, prefix="/scan", tags=["scan"])
 app.include_router(stores.router, prefix="/stores", tags=["stores"])
 app.include_router(products.router, prefix="/products", tags=["products"])
+app.include_router(recommendation.router, prefix="/recommendation", tags=["recommendation"])
 
 @app.get("/")
 @app.get("/health")
