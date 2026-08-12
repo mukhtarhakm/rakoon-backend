@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.dependencies import get_current_user
 from app.models.db_models import Store
 from pydantic import BaseModel, Field
 
@@ -116,7 +117,8 @@ async def get_nearby_stores(
 @router.post("/", response_model=StoreCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_store(
     store_data: StoreCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user)
 ):
     """
     Menambahkan toko baru secara manual ke database.

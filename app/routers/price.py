@@ -7,6 +7,7 @@ from datetime import datetime
 from app.models.schemas import PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem, VerificationStatus
 from app.models.db_models import PriceEntry, Product
 from app.database import get_db
+from app.dependencies import get_current_user
 from app.services import price_history_service
 from app.services.price_history_service import DateRange
 from app.routers.stores import get_nearby_stores
@@ -35,10 +36,14 @@ def parse_product_id(product_id: str) -> Union[int, str]:
     raise ValueError("product_id harus berupa angka integer atau UUID yang valid.")
 
 @router.post("/", response_model=PriceEntryOut, status_code=status.HTTP_201_CREATED)
-def create_price_entry(price_data: PriceEntryCreate, db: Session = Depends(get_db)):
+def create_price_entry(
+    price_data: PriceEntryCreate,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user)
+):
     """
     Simpan entri harga baru ke database.
-    Status verifikasi default diatur menjadi "pending".
+    Status verifikasi default diatur menjadi "verified".
     """
     try:
         # Validasi dan parse product_id (mendukung Integer maupun UUID)
@@ -63,7 +68,7 @@ def create_price_entry(price_data: PriceEntryCreate, db: Session = Depends(get_d
             product_id=prod_id_parsed,
             store_id=str(price_data.store_id),
             harga=price_data.harga,
-            sumber_user_id=str(price_data.sumber_user_id),
+            sumber_user_id=user_id,
             status_verifikasi=VerificationStatus.VERIFIED
         )
         
@@ -188,7 +193,7 @@ def get_price_history_v1(
 
 
 
-@router.get("/product/{product_id}")
+@router.get("/product/{product_id}", response_model=List[PriceEntryOut])
 def get_price_history(
     product_id: str,
     store_id: Optional[str] = Query(None, description="Filter berdasarkan ID toko (opsional)"),

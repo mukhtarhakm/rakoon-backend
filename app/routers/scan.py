@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse, ProductCategory, VerificationStatus
 from app.models.db_models import Product, PriceEntry
 from app.database import get_db
+from app.dependencies import get_current_user
 
 logger = logging.getLogger("rakoon_backend.scan")
 
@@ -338,7 +339,11 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
 
 
 @router.post("/confirm", response_model=ConfirmResponse, status_code=status.HTTP_201_CREATED)
-def confirm_scan_results(request_data: ConfirmRequest, db: Session = Depends(get_db)):
+def confirm_scan_results(
+    request_data: ConfirmRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user)
+):
     """
     Menyimpan hasil scan produk ke database setelah dikonfirmasi atau dikoreksi oleh user di frontend.
     Jika produk belum terdaftar di tabel 'products' (berdasarkan nama case-insensitive), produk baru akan dibuat.
@@ -387,7 +392,7 @@ def confirm_scan_results(request_data: ConfirmRequest, db: Session = Depends(get
                 product_id=product_id,
                 store_id=str(request_data.store_id),
                 harga=item.harga,
-                sumber_user_id=str(request_data.user_id),
+                sumber_user_id=user_id,
                 status_verifikasi=VerificationStatus.VERIFIED
             )
             db.add(price_entry)
