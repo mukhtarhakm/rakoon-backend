@@ -143,3 +143,39 @@ class RecommendationResponse(BaseModel):
     ranked_items: List[RankedProductItem] = Field(default_factory=list, description="Daftar produk valid terurut dari nilai terbaik")
     excluded_items: List[ExcludedProductItem] = Field(default_factory=list, description="Daftar produk yang dikecualikan dari perhitungan")
 
+# ==============================================================================
+# FEATURE: SMART BUDGET SHOPPING ASSISTANT SCHEMAS
+# ==============================================================================
+
+class BudgetItemInput(BaseModel):
+    product_id: Union[int, str, UUID] = Field(..., description="ID produk yang ingin dibeli")
+    qty: int = Field(..., gt=0, description="Kuantitas/jumlah produk yang dibeli (harus > 0)")
+
+class BudgetRecommendRequest(BaseModel):
+    budget: float = Field(..., gt=0, description="Total budget yang dialokasikan pengguna dalam Rupiah")
+    items: List[BudgetItemInput] = Field(..., min_length=1, description="Daftar barang dan kuantitas yang dibutuhkan")
+
+class BudgetItemResult(BaseModel):
+    product_id: str = Field(..., description="ID produk")
+    nama_produk: str = Field(..., description="Nama produk")
+    qty: int = Field(..., description="Jumlah item yang dibeli")
+    harga_satuan: float = Field(..., description="Harga satuan produk di toko terpilih")
+    subtotal: float = Field(..., description="Subtotal harga (harga_satuan * qty)")
+
+class StoreInfoOutput(BaseModel):
+    store_id: str = Field(..., description="ID dari toko")
+    nama: str = Field(..., description="Nama toko")
+    alamat: Optional[str] = Field(None, description="Alamat toko (bisa null)")
+    lat: Optional[float] = Field(None, description="Latitude lokasi toko")
+    lng: Optional[float] = Field(None, description="Longitude lokasi toko")
+
+class BudgetRecommendResponse(BaseModel):
+    budget: float = Field(..., description="Total budget pengguna")
+    total_cost: float = Field(..., description="Total biaya belanja di toko rekomendasi")
+    remaining_budget: float = Field(..., description="Sisa budget (budget - total_cost)")
+    is_full_match: bool = Field(False, description="True jika ditemukan toko yang memiliki 100% seluruh barang")
+    recommended_store: Optional[StoreInfoOutput] = Field(None, description="Toko yang direkomendasikan (null jika tidak ada Full Match / budget kurang)")
+    items: List[BudgetItemResult] = Field(default_factory=list, description="Rincian item belanja di toko rekomendasi")
+    explanation: str = Field(..., description="Penjelasan rinci hasil rekomendasi budget shopping")
+
+
