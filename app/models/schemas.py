@@ -4,6 +4,12 @@ from typing import Optional, Union, List, Annotated, Any
 from uuid import UUID
 from enum import Enum
 
+class VerificationStatus(str, Enum):
+    PENDING = "pending"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+
+
 class ProductCategory(str, Enum):
     MAKANAN_POKOK = "Makanan Pokok"
     MAKANAN_INSTAN = "Makanan Instan"
