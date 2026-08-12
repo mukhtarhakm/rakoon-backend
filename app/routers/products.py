@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.database import get_db
 from app.models.db_models import Product
+from app.models.schemas import ProductCategoryType
 
 from uuid import UUID
 
@@ -13,7 +14,7 @@ router = APIRouter()
 class ProductOut(BaseModel):
     id: Union[int, str, UUID] = Field(..., description="ID unik dari produk")
     nama: str = Field(..., description="Nama produk")
-    kategori: str = Field(..., description="Kategori produk")
+    kategori: ProductCategoryType = Field(..., description="Kategori produk")
     ukuran: Optional[float] = Field(None, description="Ukuran/volume/berat produk")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (gr, ml, dll)")
 

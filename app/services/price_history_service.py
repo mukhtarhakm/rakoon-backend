@@ -15,7 +15,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from app.models.db_models import PriceEntry, Product
-from app.models.schemas import PriceHistoryItem, PriceHistoryResponse, PriceTrendPoint
+from app.models.schemas import PriceHistoryItem, PriceHistoryResponse, PriceTrendPoint, VerificationStatus
 
 
 class DateRange(str, Enum):
@@ -170,8 +170,11 @@ def get_price_history(
     if not product_exists:
         raise ValueError(f"Produk dengan ID {product_id} tidak ditemukan.")
 
-    # 2. Bangun query dasar
-    query = db.query(PriceEntry).filter(PriceEntry.product_id == prod_id_str)
+    # 2. Bangun query dasar (mengecualikan 'rejected')
+    query = db.query(PriceEntry).filter(
+        PriceEntry.product_id == prod_id_str,
+        PriceEntry.status_verifikasi != VerificationStatus.REJECTED
+    )
 
     # 3. Filter store_id (FR-3.3)
     if store_id:
@@ -226,7 +229,10 @@ def get_scan_price_history_entries(
         Daftar entri riwayat harga hasil scan diurutkan berdasarkan timestamp (ascending).
     """
     prod_id_str = str(product_id)
-    query = db.query(PriceEntry).filter(PriceEntry.product_id == prod_id_str)
+    query = db.query(PriceEntry).filter(
+        PriceEntry.product_id == prod_id_str,
+        PriceEntry.status_verifikasi != VerificationStatus.REJECTED
+    )
     if store_id:
         query = query.filter(PriceEntry.store_id == store_id)
 
