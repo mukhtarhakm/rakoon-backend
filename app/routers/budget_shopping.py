@@ -12,6 +12,7 @@ from app.models.schemas import (
     BudgetRecommendResponse,
     BudgetItemResult,
     StoreInfoOutput,
+    VerificationStatus,
 )
 
 logger = logging.getLogger("rakoon_backend.budget_shopping")
@@ -34,7 +35,7 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
     """
     Rekomendasi belanja berdasarkan budget & daftar barang (Single-Store Full Match MVP).
     - HANYA merekomendasikan toko yang memiliki 100% seluruh barang yang diminta.
-    - Mengabaikan status_verifikasi pada PriceEntry.
+    - HANYA menggunakan PriceEntry yang terverifikasi (status_verifikasi = "verified").
     - Memilih toko dengan total_cost TERBESAR yang masih <= budget (memaksimalkan pemanfaatan budget).
     """
     try:
@@ -60,19 +61,22 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
         # Jika ada barang yang ID-nya bukan UUID valid, barang tersebut dipastikan tidak ada di DB (bisa membatalkan 100% full match)
         query_results = []
         if valid_uuid_pids:
-            # 2. Subquery untuk mengambil timestamp terbaru per (product_id, store_id) - mengabaikan status_verifikasi
+            # 2. Subquery untuk mengambil timestamp terbaru per (product_id, store_id) - HANYA status_verifikasi == "verified"
             subquery = (
                 db.query(
                     PriceEntry.product_id.label("pid"),
                     PriceEntry.store_id.label("sid"),
                     func.max(PriceEntry.timestamp).label("max_ts")
                 )
-                .filter(PriceEntry.product_id.in_(valid_uuid_pids))
+                .filter(
+                    PriceEntry.product_id.in_(valid_uuid_pids),
+                    func.lower(PriceEntry.status_verifikasi) == VerificationStatus.VERIFIED.value
+                )
                 .group_by(PriceEntry.product_id, PriceEntry.store_id)
                 .subquery()
             )
 
-            # 3. Query harga terbaru beserta info Product dan Store
+            # 3. Query harga terbaru yang verified beserta info Product dan Store
             query_results = (
                 db.query(
                     PriceEntry.product_id,
@@ -92,6 +96,7 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
                 )
                 .join(Product, PriceEntry.product_id == Product.id)
                 .join(Store, PriceEntry.store_id == Store.id)
+                .filter(func.lower(PriceEntry.status_verifikasi) == VerificationStatus.VERIFIED.value)
                 .all()
             )
 
