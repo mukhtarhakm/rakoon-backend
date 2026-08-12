@@ -38,6 +38,7 @@ env/
 .vscode/
 *.swp
 *.swo
+pyrefly.toml
 
 # OS files
 .DS_Store

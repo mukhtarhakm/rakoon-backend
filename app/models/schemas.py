@@ -95,3 +95,51 @@ class PriceCompareResponse(BaseModel):
     product_id: Union[int, str] = Field(..., description="ID dari produk")
     nama_produk: str = Field(..., description="Nama produk")
     comparison: List[PriceCompareItem] = Field(default_factory=list, description="Daftar perbandingan harga di toko terdekat")
+
+# ==============================================================================
+# FEATURE 2: BEST VALUE RECOMMENDATION SCHEMAS
+# ==============================================================================
+
+class RecommendationCandidate(BaseModel):
+    product_id: Optional[Union[int, str, UUID]] = Field(None, description="ID kandidat produk atau ID sementara")
+    nama_produk: Optional[str] = Field(None, description="Nama kandidat produk")
+    harga: Optional[float] = Field(None, description="Harga produk dalam Rupiah")
+    ukuran: Optional[float] = Field(None, description="Ukuran/volume/berat produk")
+    satuan: Optional[str] = Field(None, description="Satuan ukuran produk (ml, l, gr, kg, pcs, dll)")
+    kategori: Optional[str] = Field(None, description="Kategori produk (opsional)")
+
+class RecommendationRequest(BaseModel):
+    category: Optional[str] = Field(None, description="Kategori filter/pembanding opsional")
+    items: List[RecommendationCandidate] = Field(..., description="Daftar kandidat produk yang akan dievaluasi")
+
+class RankedProductItem(BaseModel):
+    product_id: Optional[str] = Field(None, description="ID kandidat produk")
+    nama_produk: str = Field(..., description="Nama produk yang terverifikasi")
+    harga: float = Field(..., description="Harga produk asli dalam Rupiah")
+    ukuran_original: float = Field(..., description="Ukuran asli produk")
+    satuan_original: str = Field(..., description="Satuan asli produk")
+    normalized_ukuran: float = Field(..., description="Ukuran setelah dikonversi ke base unit")
+    base_unit: str = Field(..., description="Satuan dasar (ml, g, atau pcs)")
+    harga_per_unit: float = Field(..., description="Harga per unit (harga / normalized_ukuran)")
+    unit_price_label: str = Field(..., description="Label harga per unit berformat (misal: 'Rp60,00 / ml')")
+    rank: int = Field(..., description="Peringkat produk (1 = Best Value)")
+    is_best_value: bool = Field(False, description="True jika produk merupakan Best Value")
+    badge: Optional[str] = Field(None, description="Badge visual (misal: 'BEST VALUE')")
+    explanation: str = Field(..., description="Alasan transparan mengapa produk memperoleh peringkat ini")
+
+class ExcludedProductItem(BaseModel):
+    product_id: Optional[str] = Field(None, description="ID kandidat produk jika ada")
+    nama_produk: Optional[str] = Field(None, description="Nama produk yang dikecualikan")
+    harga: Optional[float] = Field(None, description="Harga produk (jika ada)")
+    ukuran: Optional[float] = Field(None, description="Ukuran produk (jika ada)")
+    satuan: Optional[str] = Field(None, description="Satuan produk (jika ada)")
+    reason: str = Field(..., description="Alasan produk tidak diikutsertakan dalam kalkulasi Best Value")
+
+class RecommendationResponse(BaseModel):
+    total_evaluated: int = Field(..., description="Total jumlah kandidat yang dievaluasi")
+    total_valid: int = Field(..., description="Jumlah produk valid yang berhasil diperingkatkan")
+    total_excluded: int = Field(..., description="Jumlah produk yang dikecualikan dari perhitungan")
+    best_value: Optional[RankedProductItem] = Field(None, description="Produk dengan nilai ekonomi terbaik (Peringkat #1)")
+    ranked_items: List[RankedProductItem] = Field(default_factory=list, description="Daftar produk valid terurut dari nilai terbaik")
+    excluded_items: List[ExcludedProductItem] = Field(default_factory=list, description="Daftar produk yang dikecualikan dari perhitungan")
+
