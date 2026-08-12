@@ -46,10 +46,15 @@ class PriceEntryCreate(BaseModel):
     harga: int = Field(..., description="Price value of the product at the store")
     sumber_user_id: Union[int, str, UUID] = Field(..., description="ID of the user submitting the price")
 
-class PriceEntryOut(PriceEntryCreate):
+class PriceEntryOut(BaseModel):
     id: Union[int, str, UUID] = Field(..., description="ID of the price entry")
+    product_id: Union[int, str, UUID] = Field(..., description="ID of the product")
+    store_id: Union[int, str, UUID] = Field(..., description="ID of the store")
+    harga: int = Field(..., description="Price value of the product at the store")
     timestamp: datetime = Field(..., description="Timestamp of when the price entry was created")
     status_verifikasi: str = Field(..., description="Verification status of the price entry (e.g., 'pending')")
+
+    model_config = {"from_attributes": True}
 
 class ScanResultItem(BaseModel):
     nama_produk: Optional[str] = Field(None, description="Nama produk yang terdeteksi")
@@ -92,7 +97,6 @@ class PriceHistoryItem(BaseModel):
     product_id: Union[UUID, int, str] = Field(..., description="ID produk")
     store_id: Union[UUID, str] = Field(..., description="ID toko tempat harga dicatat")
     harga: int = Field(..., description="Harga produk (satuan: Rupiah)")
-    sumber_user_id: Union[UUID, str] = Field(..., description="ID user yang menginput harga")
     # ORM column name is `timestamp`; exposed publicly as `recorded_at`
     recorded_at: datetime = Field(..., alias="timestamp", description="Waktu harga dicatat")
     status_verifikasi: str = Field(..., description="Status verifikasi entri ('pending' / 'verified')")

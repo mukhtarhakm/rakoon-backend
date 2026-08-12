@@ -98,6 +98,17 @@ class TestPriceHistoryBackend(unittest.TestCase):
         self.assertEqual(data["total"], 4)
         self.assertEqual(len(data["items"]), 4)
         self.assertEqual(len(data["trend"]), 3)
+        for item in data["items"]:
+            self.assertNotIn("sumber_user_id", item)
+
+    def test_endpoint_get_legacy_price_history_excludes_sumber_user_id(self):
+        response = self.client.get(f"/price/product/{self.prod_id1}")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsInstance(data, list)
+        self.assertGreater(len(data), 0)
+        for item in data:
+            self.assertNotIn("sumber_user_id", item)
 
     def test_endpoint_get_price_history_filter_store(self):
         response = self.client.get(f"/price/api/v1/products/{self.prod_id1}/price-history?store_id={self.store_id1}")
