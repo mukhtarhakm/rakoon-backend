@@ -1,12 +1,13 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+import uuid
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid
 from sqlalchemy.orm import relationship
 from app.database import Base
 
 class User(Base):
     __tablename__ = "users"
     
-    id = Column(String, primary_key=True, index=True)
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     nama = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     reputasi_score = Column(Integer, default=0)
@@ -14,7 +15,7 @@ class User(Base):
 class Store(Base):
     __tablename__ = "stores"
     
-    id = Column(String, primary_key=True, index=True)
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     nama = Column(String, nullable=False)
     alamat = Column(String, nullable=True)
     lat = Column(Float, nullable=True)
@@ -23,7 +24,7 @@ class Store(Base):
 class Product(Base):
     __tablename__ = "products"
     
-    id = Column(String, primary_key=True, index=True)
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     nama = Column(String, unique=True, index=True, nullable=False)
     kategori = Column(String, default="General", nullable=False)
     ukuran = Column(Float, nullable=True)
@@ -35,11 +36,11 @@ class Product(Base):
 class PriceEntry(Base):
     __tablename__ = "price_entries"
     
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    product_id = Column(String, ForeignKey("products.id"), nullable=False)
-    store_id = Column(String, nullable=False)
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    product_id = Column(Uuid(as_uuid=False), ForeignKey("products.id"), nullable=False)
+    store_id = Column(Uuid(as_uuid=False), nullable=False)
     harga = Column(Integer, nullable=False)
-    sumber_user_id = Column(String, nullable=False)
+    sumber_user_id = Column(Uuid(as_uuid=False), nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
     status_verifikasi = Column(String, default="pending", nullable=False)
     

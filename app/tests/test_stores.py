@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.main import app
 from app.database import Base, get_db
-from app.models.db_models import Store
+from app.models.db_models import Store, Product, PriceEntry
 
 # In-memory SQLite for testing
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test_rakoon.db"
@@ -42,8 +42,10 @@ class TestStores(unittest.TestCase):
             os.remove("./test_rakoon.db")
 
     def setUp(self):
-        # Clean the stores table before each test
+        # Clean the tables before each test
         db = TestingSessionLocal()
+        db.query(PriceEntry).delete()
+        db.query(Product).delete()
         db.query(Store).delete()
         db.commit()
         db.close()
@@ -111,9 +113,9 @@ class TestStores(unittest.TestCase):
         # Insert test stores
         db = TestingSessionLocal()
         # Close-by store (~1 km away)
-        store1 = Store(id="store-1", nama="Toko Dekat", lat=-6.2088, lng=106.8546, alamat="Dekat")
+        store1 = Store(id="a5b07384-d113-4956-b51c-43f11075d654", nama="Toko Dekat", lat=-6.2088, lng=106.8546, alamat="Dekat")
         # Far store (~10 km away)
-        store2 = Store(id="store-2", nama="Toko Jauh", lat=-6.2088, lng=106.9356, alamat="Jauh")
+        store2 = Store(id="a5b07384-d113-4956-b51c-43f11075d655", nama="Toko Jauh", lat=-6.2088, lng=106.9356, alamat="Jauh")
         db.add(store1)
         db.add(store2)
         db.commit()
@@ -131,7 +133,7 @@ class TestStores(unittest.TestCase):
 
         # Add another close-by store to have 2 or more stores
         db = TestingSessionLocal()
-        store3 = Store(id="store-3", nama="Toko Dekat 2", lat=-6.2100, lng=106.8450, alamat="Dekat 2")
+        store3 = Store(id="a5b07384-d113-4956-b51c-43f11075d656", nama="Toko Dekat 2", lat=-6.2100, lng=106.8450, alamat="Dekat 2")
         db.add(store3)
         db.commit()
         db.close()
@@ -149,17 +151,18 @@ class TestStores(unittest.TestCase):
         # Insert a product and a store and price entry
         db = TestingSessionLocal()
         product = Product(id="d3b07384-d113-4956-b51c-43f11075d654", nama="Susu UHT", kategori="Minuman", ukuran=1000.0, satuan="ml")
-        store1 = Store(id="store-1", nama="Toko Dekat", lat=-6.2088, lng=106.8546, alamat="Dekat")
+        store1 = Store(id="a5b07384-d113-4956-b51c-43f11075d654", nama="Toko Dekat", lat=-6.2088, lng=106.8546, alamat="Dekat")
         db.add(product)
         db.add(store1)
         db.commit()
 
         # Add price entry
         price_entry = PriceEntry(
+            id="e5b07384-d113-4956-b51c-43f11075d654",
             product_id="d3b07384-d113-4956-b51c-43f11075d654",
-            store_id="store-1",
+            store_id="a5b07384-d113-4956-b51c-43f11075d654",
             harga=15000,
-            sumber_user_id="user-1",
+            sumber_user_id="b5b07384-d113-4956-b51c-43f11075d654",
             status_verifikasi="pending"
         )
         db.add(price_entry)
@@ -175,4 +178,54 @@ class TestStores(unittest.TestCase):
         self.assertEqual(len(data["comparison"]), 1)
         self.assertEqual(data["comparison"][0]["nama_toko"], "Toko Dekat")
         self.assertEqual(data["comparison"][0]["harga_terbaru"], 15000)
+
+    def test_confirm_scan_results(self):
+        # 1. Insert store & an existing product
+        db = TestingSessionLocal()
+        store = Store(id="a5b07384-d113-4956-b51c-43f11075d654", nama="Toko Uji", lat=-6.2088, lng=106.8456)
+        existing_product = Product(id="c5b07384-d113-4956-b51c-43f11075d654", nama="Ultra Milk Rasa Coklat", kategori="General", ukuran=1000.0, satuan="ml")
+        db.add(store)
+        db.add(existing_product)
+        db.commit()
+        db.close()
+
+        # 2. Call /scan/confirm to add one existing product price and one new product price
+        payload = {
+            "store_id": "a5b07384-d113-4956-b51c-43f11075d654",
+            "user_id": "b5b07384-d113-4956-b51c-43f11075d655",
+            "items": [
+                {
+                    "nama_produk": "Ultra Milk Rasa Coklat",
+                    "harga": 22500,
+                    "ukuran": 1000.0,
+                    "satuan": "ml"
+                },
+                {
+                    "nama_produk": "Ultra Milk Fresh Milk Biru",
+                    "harga": 26200,
+                    "ukuran": 1000.0,
+                    "satuan": "ml"
+                }
+            ]
+        }
+
+        response = self.client.post("/scan/confirm", json=payload)
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        
+        self.assertEqual(data["items_saved"], 2)
+        self.assertEqual(data["products_created"], 1) # Only "Ultra Milk Fresh Milk Biru" should be created
+        
+        # Verify the new product has been saved in the DB with a non-null, valid UUID id
+        db = TestingSessionLocal()
+        new_prod = db.query(Product).filter(Product.nama == "Ultra Milk Fresh Milk Biru").first()
+        self.assertIsNotNone(new_prod)
+        self.assertIsNotNone(new_prod.id)
+        self.assertNotEqual(new_prod.id, "")
+        self.assertNotEqual(str(new_prod.id), "c5b07384-d113-4956-b51c-43f11075d654")
+        
+        # Verify the price entries have been saved
+        price_entries = db.query(PriceEntry).all()
+        self.assertEqual(len(price_entries), 2)
+        db.close()
 
