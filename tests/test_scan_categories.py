@@ -31,11 +31,15 @@ class TestScanCategories(unittest.TestCase):
         self.db = TestingSessionLocal()
         self.original_get_db = app.dependency_overrides.get(get_db)
         app.dependency_overrides[get_db] = lambda: self.db
+        from app.dependencies import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: "b5b07384-d113-4956-b51c-43f11075d655"
         self.client = TestClient(app)
 
     def tearDown(self):
         self.db.close()
         Base.metadata.drop_all(bind=engine)
+        from app.dependencies import get_current_user
+        app.dependency_overrides.pop(get_current_user, None)
         if self.original_get_db is not None:
             app.dependency_overrides[get_db] = self.original_get_db
         else:

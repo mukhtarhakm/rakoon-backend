@@ -33,9 +33,13 @@ class TestStores(unittest.TestCase):
     def setUpClass(cls):
         Base.metadata.create_all(bind=engine)
         cls.client = TestClient(app)
+        from app.dependencies import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: "b5b07384-d113-4956-b51c-43f11075d655"
 
     @classmethod
     def tearDownClass(cls):
+        from app.dependencies import get_current_user
+        app.dependency_overrides.pop(get_current_user, None)
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
         if os.path.exists("./test_rakoon.db"):

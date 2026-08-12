@@ -25,6 +25,8 @@ class TestVerificationStatus(unittest.TestCase):
         self.db = TestingSessionLocal()
         self.original_get_db = app.dependency_overrides.get(get_db)
         app.dependency_overrides[get_db] = lambda: self.db
+        from app.dependencies import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: self.user_id
         self.client = TestClient(app)
 
         # Seed initial data
@@ -41,6 +43,8 @@ class TestVerificationStatus(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         Base.metadata.drop_all(bind=engine)
+        from app.dependencies import get_current_user
+        app.dependency_overrides.pop(get_current_user, None)
         if self.original_get_db is not None:
             app.dependency_overrides[get_db] = self.original_get_db
         else:
