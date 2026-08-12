@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Union, Optional
 from datetime import datetime
-from app.models.schemas import PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem
+from app.models.schemas import PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem, VerificationStatus
 from app.models.db_models import PriceEntry, Product
 from app.database import get_db
 from app.services import price_history_service
@@ -58,13 +58,13 @@ def create_price_entry(price_data: PriceEntryCreate, db: Session = Depends(get_d
                 detail=f"Produk dengan ID {price_data.product_id} tidak ditemukan."
             )
 
-        # Menyiapkan data insert dengan status_verifikasi default "pending"
+        # Menyiapkan data insert dengan status_verifikasi default "verified"
         db_entry = PriceEntry(
             product_id=prod_id_parsed,
             store_id=str(price_data.store_id),
             harga=price_data.harga,
             sumber_user_id=str(price_data.sumber_user_id),
-            status_verifikasi="pending"
+            status_verifikasi=VerificationStatus.VERIFIED
         )
         
         db.add(db_entry)
@@ -274,10 +274,11 @@ async def get_price_comparison(
         # 4. Ambil harga terbaru dari tiap toko
         comparison_list = []
         for store in nearby_stores:
-            # Query harga terupdate (order by timestamp DESC)
+            # Query harga terupdate (order by timestamp DESC, mengecualikan 'rejected')
             latest_entry = db.query(PriceEntry).filter(
                 PriceEntry.product_id == prod_id_parsed,
-                PriceEntry.store_id == store.store_id
+                PriceEntry.store_id == store.store_id,
+                PriceEntry.status_verifikasi != VerificationStatus.REJECTED
             ).order_by(PriceEntry.timestamp.desc()).first()
 
             if latest_entry:

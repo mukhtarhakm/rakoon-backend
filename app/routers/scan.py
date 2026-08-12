@@ -7,7 +7,7 @@ from typing import Optional, List
 import httpx
 from fastapi import APIRouter, File, UploadFile, HTTPException, status, Depends
 from sqlalchemy.orm import Session
-from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse, ProductCategory
+from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse, ProductCategory, VerificationStatus
 from app.models.db_models import Product, PriceEntry
 from app.database import get_db
 
@@ -388,7 +388,7 @@ def confirm_scan_results(request_data: ConfirmRequest, db: Session = Depends(get
                 store_id=str(request_data.store_id),
                 harga=item.harga,
                 sumber_user_id=str(request_data.user_id),
-                status_verifikasi="pending"
+                status_verifikasi=VerificationStatus.VERIFIED
             )
             db.add(price_entry)
             items_saved += 1
