@@ -7,7 +7,10 @@ from app.models.schemas import (
     RecommendationRequest,
     RankedProductItem,
     ExcludedProductItem,
+    DimensionRecommendationGroup,
+    CategoryRecommendationGroup,
     RecommendationResponse,
+    validate_category,
 )
 
 logger = logging.getLogger("rakoon_backend.recommendation")
@@ -76,6 +79,7 @@ def format_unit_price(harga_per_unit: float, base_unit: str) -> str:
 def evaluate_best_value_logic(items: List[RecommendationCandidate]) -> RecommendationResponse:
     """
     Core deterministic business logic untuk menghitung dan menentukan Best Value Recommendation.
+    Berbasis pengelompokan Kategori produk dan Dimensi Satuan yang kompatibel.
     Modular dan independen tanpa dependensi ke AI/LLM atau database.
     """
     if not items:
@@ -83,8 +87,7 @@ def evaluate_best_value_logic(items: List[RecommendationCandidate]) -> Recommend
             total_evaluated=0,
             total_valid=0,
             total_excluded=0,
-            best_value=None,
-            ranked_items=[],
+            categories=[],
             excluded_items=[]
         )
 
@@ -92,7 +95,7 @@ def evaluate_best_value_logic(items: List[RecommendationCandidate]) -> Recommend
     raw_valid_candidates = []
     excluded_items: List[ExcludedProductItem] = []
 
-    # 1. Validation Phase
+    # 1. Validation & Category Normalization Phase
     for idx, item in enumerate(items):
         item_id_str = str(item.product_id) if item.product_id is not None else f"item-{idx + 1}"
         nama = item.nama_produk.strip() if item.nama_produk else None
@@ -143,12 +146,16 @@ def evaluate_best_value_logic(items: List[RecommendationCandidate]) -> Recommend
             continue
 
         dimension, base_unit, normalized_ukuran = norm_result
+        cat_enum = validate_category(item.kategori)
+        cat_value = cat_enum.value
+
         raw_valid_candidates.append({
             "product_id": item_id_str,
             "nama_produk": nama,
             "harga": float(item.harga),
             "ukuran_original": float(item.ukuran),
             "satuan_original": str(item.satuan),
+            "kategori": cat_value,
             "dimension": dimension,
             "base_unit": base_unit,
             "normalized_ukuran": float(normalized_ukuran),
@@ -160,101 +167,112 @@ def evaluate_best_value_logic(items: List[RecommendationCandidate]) -> Recommend
             total_evaluated=total_evaluated,
             total_valid=0,
             total_excluded=len(excluded_items),
-            best_value=None,
-            ranked_items=[],
+            categories=[],
             excluded_items=excluded_items
         )
 
-    # 2. Comparability Dimension Check
-    # Cari dimensi terbanyak (misal mayoritas volume 'ml')
-    dimension_counts: Dict[str, int] = {}
+    # 2. Group by Category
+    category_map: Dict[str, List[dict]] = {}
     for cand in raw_valid_candidates:
-        dim = cand["dimension"]
-        dimension_counts[dim] = dimension_counts.get(dim, 0) + 1
+        cat = cand["kategori"]
+        category_map.setdefault(cat, []).append(cand)
 
-    dominant_dimension = max(dimension_counts.items(), key=lambda x: x[1])[0]
+    categories_response: List[CategoryRecommendationGroup] = []
+    total_valid_count = 0
 
-    filtered_valid_candidates = []
-    for cand in raw_valid_candidates:
-        if cand["dimension"] == dominant_dimension:
-            filtered_valid_candidates.append(cand)
-        else:
-            excluded_items.append(ExcludedProductItem(
-                product_id=cand["product_id"],
-                nama_produk=cand["nama_produk"],
-                harga=cand["harga"],
-                ukuran=cand["ukuran_original"],
-                satuan=cand["satuan_original"],
-                reason=f"Dimensi satuan '{cand['satuan_original']}' tidak dapat dibandingkan dengan produk lain berdimensi '{dominant_dimension}'."
+    dimension_labels = {
+        "volume": "Volume",
+        "weight": "Berat",
+        "count": "Jumlah",
+    }
+
+    # 3. For each Category, Group by Compatible Dimension
+    for cat_name, cat_items in category_map.items():
+        dim_map: Dict[str, List[dict]] = {}
+        for item in cat_items:
+            dim = item["dimension"]
+            dim_map.setdefault(dim, []).append(item)
+
+        dim_groups_response: List[DimensionRecommendationGroup] = []
+
+        for dim_name, dim_items in dim_map.items():
+            # Sort items in dimension group ascending by harga_per_unit
+            dim_items.sort(key=lambda x: x["harga_per_unit"])
+
+            base_unit = dim_items[0]["base_unit"]
+            dim_label = f"{dimension_labels.get(dim_name, dim_name.capitalize())} ({base_unit})"
+
+            is_comparable = len(dim_items) >= 2
+            ranked_items: List[RankedProductItem] = []
+            best_unit_price = dim_items[0]["harga_per_unit"]
+            best_item_name = dim_items[0]["nama_produk"]
+
+            for rank_idx, cand in enumerate(dim_items, start=1):
+                total_valid_count += 1
+                unit_label = format_unit_price(cand["harga_per_unit"], cand["base_unit"])
+
+                if is_comparable:
+                    is_best = (rank_idx == 1)
+                    badge = "BEST VALUE" if is_best else None
+
+                    if is_best:
+                        runner_up_price = dim_items[1]["harga_per_unit"]
+                        save_vs_runner_up = ((runner_up_price - best_unit_price) / runner_up_price) * 100.0
+                        explanation = (
+                            f"Pilihan Paling Hemat! Memiliki harga per {cand['base_unit']} terendah ({unit_label}), "
+                            f"lebih hemat {save_vs_runner_up:.1f}% dibanding pilihan peringkat #2 ({dim_items[1]['nama_produk']})."
+                        )
+                    else:
+                        diff_vs_best = ((cand["harga_per_unit"] - best_unit_price) / best_unit_price) * 100.0
+                        explanation = (
+                            f"Peringkat #{rank_idx} ({unit_label}). "
+                            f"Lebih mahal {diff_vs_best:.1f}% dibanding {best_item_name} (Best Value)."
+                        )
+                else:
+                    # Single item in dimension group
+                    is_best = False
+                    badge = None
+                    explanation = "Belum ada produk pembanding yang compatible dalam kelompok dimensi ini."
+
+                ranked_items.append(RankedProductItem(
+                    product_id=cand["product_id"],
+                    nama_produk=cand["nama_produk"],
+                    harga=cand["harga"],
+                    ukuran_original=cand["ukuran_original"],
+                    satuan_original=cand["satuan_original"],
+                    normalized_ukuran=cand["normalized_ukuran"],
+                    base_unit=cand["base_unit"],
+                    harga_per_unit=cand["harga_per_unit"],
+                    unit_price_label=unit_label,
+                    rank=rank_idx,
+                    is_best_value=is_best,
+                    badge=badge,
+                    explanation=explanation
+                ))
+
+            best_value_item = ranked_items[0] if is_comparable else None
+            msg = None if is_comparable else "Belum ada produk pembanding yang compatible."
+
+            dim_groups_response.append(DimensionRecommendationGroup(
+                dimension=dim_name,
+                dimension_label=dim_label,
+                base_unit=base_unit,
+                is_comparable=is_comparable,
+                message=msg,
+                best_value=best_value_item,
+                ranked_items=ranked_items
             ))
 
-    if not filtered_valid_candidates:
-        return RecommendationResponse(
-            total_evaluated=total_evaluated,
-            total_valid=0,
-            total_excluded=len(excluded_items),
-            best_value=None,
-            ranked_items=[],
-            excluded_items=excluded_items
-        )
-
-    # 3. Ranking Phase (Ascending order of harga_per_unit)
-    filtered_valid_candidates.sort(key=lambda x: x["harga_per_unit"])
-
-    best_item = filtered_valid_candidates[0]
-    best_unit_price = best_item["harga_per_unit"]
-
-    # Hitung rata-rata harga per unit untuk pembanding persentase kehematan
-    avg_unit_price = sum(c["harga_per_unit"] for c in filtered_valid_candidates) / len(filtered_valid_candidates)
-
-    ranked_items: List[RankedProductItem] = []
-    for rank_idx, cand in enumerate(filtered_valid_candidates, start=1):
-        is_best = (rank_idx == 1)
-        badge = "BEST VALUE" if is_best else None
-        unit_label = format_unit_price(cand["harga_per_unit"], cand["base_unit"])
-
-        # Generasi penjelasan transparan & explainable
-        if is_best:
-            if len(filtered_valid_candidates) > 1:
-                runner_up_price = filtered_valid_candidates[1]["harga_per_unit"]
-                save_vs_runner_up = ((runner_up_price - best_unit_price) / runner_up_price) * 100.0
-                explanation = (
-                    f"Pilihan Paling Hemat! Memiliki harga per {cand['base_unit']} terendah ({unit_label}), "
-                    f"lebih hemat {save_vs_runner_up:.1f}% dibanding pilihan peringkat #2 ({filtered_valid_candidates[1]['nama_produk']})."
-                )
-            else:
-                explanation = (
-                    f"Pilihan Utama! Memiliki harga per {cand['base_unit']} sebesar {unit_label}."
-                )
-        else:
-            diff_vs_best = ((cand["harga_per_unit"] - best_unit_price) / best_unit_price) * 100.0
-            explanation = (
-                f"Peringkat #{rank_idx} ({unit_label}). "
-                f"Lebih mahal {diff_vs_best:.1f}% dibanding {best_item['nama_produk']} (Best Value)."
-            )
-
-        ranked_items.append(RankedProductItem(
-            product_id=cand["product_id"],
-            nama_produk=cand["nama_produk"],
-            harga=cand["harga"],
-            ukuran_original=cand["ukuran_original"],
-            satuan_original=cand["satuan_original"],
-            normalized_ukuran=cand["normalized_ukuran"],
-            base_unit=cand["base_unit"],
-            harga_per_unit=cand["harga_per_unit"],
-            unit_price_label=unit_label,
-            rank=rank_idx,
-            is_best_value=is_best,
-            badge=badge,
-            explanation=explanation
+        categories_response.append(CategoryRecommendationGroup(
+            kategori=cat_name,
+            dimension_groups=dim_groups_response
         ))
 
     return RecommendationResponse(
         total_evaluated=total_evaluated,
-        total_valid=len(ranked_items),
+        total_valid=total_valid_count,
         total_excluded=len(excluded_items),
-        best_value=ranked_items[0] if ranked_items else None,
-        ranked_items=ranked_items,
+        categories=categories_response,
         excluded_items=excluded_items
     )
 
