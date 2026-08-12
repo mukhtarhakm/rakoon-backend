@@ -1,6 +1,7 @@
 import os
 import base64
 import json
+import re
 import logging
 from typing import Optional, List
 import httpx
@@ -33,6 +34,45 @@ def clean_str(val) -> Optional[str]:
     if not val_str or val_str.lower() in ("null", "none"):
         return None
     return val_str
+
+def extract_and_parse_json(text: str) -> dict:
+    """
+    Ekstrak JSON dari teks mentah yang dihasilkan oleh LLM.
+    Mendukung format JSON bersih, JSON di dalam block markdown (```json ... ```),
+    serta membersihkan tag reasoning/thinking (<think>...</think>) jika ada.
+    """
+    cleaned = text.strip()
+    cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
+    
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+        
+    markdown_match = re.search(r'```(?:json)?\s*(.*?)\s*```', cleaned, re.DOTALL)
+    if markdown_match:
+        try:
+            return json.loads(markdown_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+            
+    first_brace = cleaned.find('{')
+    last_brace = cleaned.rfind('}')
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(cleaned[first_brace:last_brace + 1])
+        except json.JSONDecodeError:
+            pass
+            
+    first_bracket = cleaned.find('[')
+    last_bracket = cleaned.rfind(']')
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        try:
+            return json.loads(cleaned[first_bracket:last_bracket + 1])
+        except json.JSONDecodeError:
+            pass
+            
+    raise json.JSONDecodeError("Gagal mengekstrak JSON dari respon AI.", cleaned, 0)
 
 @router.post("/", response_model=ScanResponse, status_code=status.HTTP_200_OK)
 async def scan_shelf_photo(file: UploadFile = File(...)):
@@ -72,6 +112,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="File foto yang diunggah kosong."
             )
+        logger.info(f"Received file '{file.filename}' ({len(contents)} bytes) for scanning.")
     except HTTPException:
         raise
     except Exception as e:
@@ -95,6 +136,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
 
     # 3. Encode image ke Base64
     try:
+        logger.info("Encoding image to Base64...")
         base64_image = base64.b64encode(contents).decode("utf-8")
     except Exception as e:
         logger.error(f"Error encoding image to base64: {str(e)}")
@@ -115,6 +157,10 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
     payload = {
         "model": groq_model,
         "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that only outputs valid JSON. Do not include any explanation, conversational text, or markdown code blocks (like ```json). Output must be strictly valid JSON matching the requested schema."
+            },
             {
                 "role": "user",
                 "content": [
@@ -142,15 +188,20 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
                     }
                 ]
             }
-        ],
-        "response_format": {
-            "type": "json_object"
-        }
+        ]
     }
 
+    # Disable thinking tokens for Qwen models to ensure fast response, low token usage, and avoid JSON format errors or timeouts
+    if "qwen" in groq_model.lower():
+        payload["reasoning_effort"] = "none"
+
+
     try:
+        logger.info(f"Sending request to Groq API using model '{groq_model}'...")
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, headers=headers, json=payload)
+            
+        logger.info(f"Groq API responded with status code {response.status_code}")
             
         if response.status_code != 200:
             logger.error(f"Groq API returned error {response.status_code}: {response.text}")
@@ -185,7 +236,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
             logger.warning(f"Empty content in Groq response: {groq_data}")
             return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
             
-        parsed_json = json.loads(text_content)
+        parsed_json = extract_and_parse_json(text_content)
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         logger.error(f"Failed to parse Groq JSON content: {str(e)}")
         return ScanResponse(
@@ -200,6 +251,8 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
             detected_items = parsed_json
         else:
             detected_items = []
+            
+    logger.info(f"Parsed AI response successfully. Detected {len(detected_items)} items on shelf.")
 
     if not detected_items:
         return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
@@ -266,47 +319,46 @@ def confirm_scan_results(request_data: ConfirmRequest, db: Session = Depends(get
             clean_name = item.nama_produk.strip()
             
             # 1. Cek apakah produk dengan nama yang sama sudah ada di tabel products (case-insensitive match)
-            product = db.query(Product).filter(Product.nama.ilike(clean_name)).first()
+            # Cek di session's new objects terlebih dahulu untuk menghindari duplikasi dalam batch yang sama
+            product = None
+            for obj in db.new:
+                if isinstance(obj, Product) and obj.nama.lower() == clean_name.lower():
+                    product = obj
+                    break
+            
+            if not product:
+                product = db.query(Product).filter(Product.nama.ilike(clean_name)).first()
             
             if product:
                 # Produk sudah ada, ambil product_id-nya
                 product_id = product.id
             else:
                 # Produk belum ada, buat produk baru
-                try:
-                    new_product = Product(
-                        nama=clean_name,
-                        ukuran=item.ukuran,
-                        satuan=item.satuan,
-                        kategori="General"  # Kategori default
-                    )
-                    db.add(new_product)
-                    db.commit()
-                    db.refresh(new_product)
-                    product_id = new_product.id
-                    products_created += 1
-                except Exception as ex:
-                    db.rollback()
-                    logger.error(f"Gagal membuat produk baru untuk nama {clean_name}: {str(ex)}")
-                    continue
+                new_product = Product(
+                    nama=clean_name,
+                    ukuran=item.ukuran,
+                    satuan=item.satuan,
+                    kategori="General"  # Kategori default
+                )
+                db.add(new_product)
+                db.flush() # Flush untuk mendapatkan generated ID dari database
+                product_id = new_product.id
+                products_created += 1
                 
             # 2. Insert ke tabel price_entries untuk tiap item
-            try:
-                price_entry = PriceEntry(
-                    product_id=product_id,
-                    store_id=str(request_data.store_id),
-                    harga=item.harga,
-                    sumber_user_id=str(request_data.user_id),
-                    status_verifikasi="pending"
-                )
-                db.add(price_entry)
-                db.commit()
-                db.refresh(price_entry)
-                items_saved += 1
-            except Exception as ex:
-                db.rollback()
-                logger.error(f"Gagal menyimpan harga untuk product_id {product_id}: {str(ex)}")
-                
+            price_entry = PriceEntry(
+                product_id=product_id,
+                store_id=str(request_data.store_id),
+                harga=item.harga,
+                sumber_user_id=str(request_data.user_id),
+                status_verifikasi="pending"
+            )
+            db.add(price_entry)
+            items_saved += 1
+            
+        # Commit seluruh perubahan sekaligus
+        db.commit()
+        
         message = f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru."
         return ConfirmResponse(
             items_saved=items_saved,

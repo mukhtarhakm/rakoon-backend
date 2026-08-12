@@ -164,19 +164,11 @@ def get_price_history(
     """
     prod_id_str = str(product_id)
 
-    # 1. Validasi keberadaan produk (dengan fallback jika non-UUID disentuh di DB UUID)
-    product_exists = None
-    if is_valid_uuid(prod_id_str):
-        product_exists = db.query(Product.id).filter(Product.id == prod_id_str).first()
+    # 1. Validasi keberadaan produk
+    product_exists = db.query(Product.id).filter(Product.id == prod_id_str).first()
     
     if not product_exists:
-        # Cari apakah ada produk apapun di database sebagai fallback ID
-        first_product = db.query(Product).first()
-        if first_product:
-            prod_id_str = str(first_product.id)
-            product_exists = True
-        else:
-            raise ValueError(f"Produk dengan ID {product_id} tidak ditemukan.")
+        raise ValueError(f"Produk dengan ID {product_id} tidak ditemukan.")
 
     # 2. Bangun query dasar
     query = db.query(PriceEntry).filter(PriceEntry.product_id == prod_id_str)
