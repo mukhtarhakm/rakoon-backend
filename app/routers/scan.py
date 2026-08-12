@@ -7,13 +7,31 @@ from typing import Optional, List
 import httpx
 from fastapi import APIRouter, File, UploadFile, HTTPException, status, Depends
 from sqlalchemy.orm import Session
-from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse
+from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse, ProductCategory
 from app.models.db_models import Product, PriceEntry
 from app.database import get_db
 
 logger = logging.getLogger("rakoon_backend.scan")
 
 router = APIRouter()
+
+def normalize_and_validate_category(val) -> str:
+    cleaned = clean_str(val)
+    if not cleaned:
+        return ProductCategory.LAINNYA.value
+    
+    # 1. Check direct matches against ProductCategory values (case-insensitive)
+    for member in ProductCategory:
+        if member.value.lower() == cleaned.lower():
+            return member.value
+            
+    # 2. Check matches against ProductCategory names (case-insensitive)
+    for member in ProductCategory:
+        if member.name.lower() == cleaned.replace(" ", "_").replace("&", "").replace("__", "_").lower():
+            return member.value
+            
+    return ProductCategory.LAINNYA.value
+
 
 def clean_numeric(val) -> Optional[float]:
     if val is None:
@@ -174,9 +192,22 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
                             "- harga: harga produk (angka/number, null jika tidak terbaca)\n"
                             "- ukuran: ukuran/volume/berat produk (angka/number, null jika tidak terbaca)\n"
                             "- satuan: satuan ukuran seperti ml, gr, kg, pcs, dll. (string, null jika tidak terbaca)\n"
+                            "- kategori: kategori produk yang HARUS dipilih dari daftar authoritative berikut:\n"
+                            "  * Makanan Pokok\n"
+                            "  * Makanan Instan\n"
+                            "  * Camilan\n"
+                            "  * Minuman\n"
+                            "  * Susu & Olahan\n"
+                            "  * Bumbu & Saus\n"
+                            "  * Perawatan Diri\n"
+                            "  * Produk Rumah Tangga\n"
+                            "  * Kesehatan\n"
+                            "  * Bayi\n"
+                            "  * Lainnya\n"
+                            "  AI TIDAK BOLEH membuat kategori baru di luar daftar di atas. Jika tidak yakin atau tidak ada yang cocok, gunakan 'Lainnya'.\n"
                             "- confidence: 'tinggi' jika Anda sangat yakin dengan informasinya, 'rendah' jika ragu-ragu (string)\n\n"
                             "Kembalikan hasilnya dalam format JSON dengan kunci utama bernama 'detected'. "
-                            "Contoh output: {\"detected\": [{\"nama_produk\": \"Susu UHT\", \"harga\": 15000, \"ukuran\": 1000, \"satuan\": \"ml\", \"confidence\": \"tinggi\"}]}. "
+                            "Contoh output: {\"detected\": [{\"nama_produk\": \"Indomie Mi Goreng\", \"harga\": 3500, \"ukuran\": 85, \"satuan\": \"g\", \"kategori\": \"Makanan Instan\", \"confidence\": \"tinggi\"}]}. "
                             "Jika sama sekali tidak ada produk yang terdeteksi di foto, kembalikan 'detected' sebagai array kosong."
                         )
                     },
@@ -267,6 +298,8 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
         harga = clean_numeric(item.get("harga"))
         ukuran = clean_numeric(item.get("ukuran"))
         satuan = clean_str(item.get("satuan"))
+        kategori_raw = item.get("kategori")
+        kategori_val = normalize_and_validate_category(kategori_raw)
         
         # Normalkan confidence
         confidence_val = item.get("confidence")
@@ -292,6 +325,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
                 harga=harga,
                 ukuran=ukuran,
                 satuan=satuan,
+                kategori=kategori_val,
                 confidence=confidence_val,
                 needs_verification=needs_verification
             )
@@ -332,13 +366,16 @@ def confirm_scan_results(request_data: ConfirmRequest, db: Session = Depends(get
             if product:
                 # Produk sudah ada, ambil product_id-nya
                 product_id = product.id
+                # Update category only if the existing category is legacy "General"
+                if product.kategori.strip().lower() == "general":
+                    product.kategori = item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
             else:
                 # Produk belum ada, buat produk baru
                 new_product = Product(
                     nama=clean_name,
                     ukuran=item.ukuran,
                     satuan=item.satuan,
-                    kategori="General"  # Kategori default
+                    kategori=item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
                 )
                 db.add(new_product)
                 db.flush() # Flush untuk mendapatkan generated ID dari database

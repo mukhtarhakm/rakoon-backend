@@ -1,7 +1,38 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, BeforeValidator
 from datetime import datetime
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Annotated, Any
 from uuid import UUID
+from enum import Enum
+
+class ProductCategory(str, Enum):
+    MAKANAN_POKOK = "Makanan Pokok"
+    MAKANAN_INSTAN = "Makanan Instan"
+    CAMILAN = "Camilan"
+    MINUMAN = "Minuman"
+    SUSU_OLAHAN = "Susu & Olahan"
+    BUMBU_SAUS = "Bumbu & Saus"
+    PERAWATAN_DIRI = "Perawatan Diri"
+    PRODUK_RUMAH_TANGGA = "Produk Rumah Tangga"
+    KESEHATAN = "Kesehatan"
+    BAYI = "Bayi"
+    LAINNYA = "Lainnya"
+
+def validate_category(v: Any) -> ProductCategory:
+    if isinstance(v, ProductCategory):
+        return v
+    if isinstance(v, str):
+        cleaned = v.strip()
+        # Exact or case-insensitive match against Enum values
+        for member in ProductCategory:
+            if member.value.lower() == cleaned.lower():
+                return member
+        # Case-insensitive match against Enum names
+        for member in ProductCategory:
+            if member.name.lower() == cleaned.replace(" ", "_").replace("&", "").replace("__", "_").lower():
+                return member
+    return ProductCategory.LAINNYA
+
+ProductCategoryType = Annotated[ProductCategory, BeforeValidator(validate_category)]
 
 class PriceEntryCreate(BaseModel):
     product_id: Union[int, str, UUID] = Field(..., description="ID of the product")
@@ -19,6 +50,7 @@ class ScanResultItem(BaseModel):
     harga: Optional[float] = Field(None, description="Harga produk (angka, null jika tidak terbaca)")
     ukuran: Optional[float] = Field(None, description="Ukuran produk (angka, null jika tidak terbaca)")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (null jika tidak terbaca)")
+    kategori: ProductCategoryType = Field(default=ProductCategory.LAINNYA, description="Kategori produk")
     confidence: str = Field(..., description="Tingkat kepercayaan ('tinggi' atau 'rendah')")
     needs_verification: bool = Field(False, description="Menandakan apakah item butuh verifikasi manual")
 
@@ -31,6 +63,7 @@ class ConfirmItem(BaseModel):
     harga: int = Field(..., description="Harga produk hasil konfirmasi/koreksi")
     ukuran: Optional[float] = Field(None, description="Ukuran produk (nullable)")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (nullable)")
+    kategori: ProductCategoryType = Field(default=ProductCategory.LAINNYA, description="Kategori produk hasil konfirmasi/koreksi")
 
 class ConfirmRequest(BaseModel):
     store_id: Union[int, str, UUID] = Field(..., description="ID dari toko tempat scan dilakukan")
