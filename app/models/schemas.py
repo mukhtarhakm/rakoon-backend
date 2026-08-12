@@ -194,6 +194,7 @@ class RecommendationResponse(BaseModel):
     categories: List[CategoryRecommendationGroup] = Field(default_factory=list, description="Daftar kelompok rekomendasi per kategori")
     excluded_items: List[ExcludedProductItem] = Field(default_factory=list, description="Daftar produk yang dikecualikan dari perhitungan")
 
+
 # ==============================================================================
 # FEATURE: SMART BUDGET SHOPPING ASSISTANT SCHEMAS
 # ==============================================================================
