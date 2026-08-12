@@ -174,11 +174,24 @@ class ExcludedProductItem(BaseModel):
     satuan: Optional[str] = Field(None, description="Satuan produk (jika ada)")
     reason: str = Field(..., description="Alasan produk tidak diikutsertakan dalam kalkulasi Best Value")
 
+class DimensionRecommendationGroup(BaseModel):
+    dimension: str = Field(..., description="Dimensi satuan ('volume', 'weight', atau 'count')")
+    dimension_label: str = Field(..., description="Label dimensi berformat (misal: 'Volume (ml)', 'Berat (g)')")
+    base_unit: str = Field(..., description="Satuan dasar dimensi ('ml', 'g', atau 'pcs')")
+    is_comparable: bool = Field(True, description="True jika terdapat minimal 2 produk terbandingkan")
+    message: Optional[str] = Field(None, description="Pesan tambahan jika produk tidak dapat dibandingkan (misal item tunggal)")
+    best_value: Optional[RankedProductItem] = Field(None, description="Produk Best Value (Peringkat #1) dalam kelompok dimensi ini")
+    ranked_items: List[RankedProductItem] = Field(default_factory=list, description="Daftar produk terurut dalam kelompok dimensi ini")
+
+class CategoryRecommendationGroup(BaseModel):
+    kategori: str = Field(..., description="Nama kategori produk")
+    dimension_groups: List[DimensionRecommendationGroup] = Field(default_factory=list, description="Daftar kelompok dimensi dalam kategori ini")
+
 class RecommendationResponse(BaseModel):
     total_evaluated: int = Field(..., description="Total jumlah kandidat yang dievaluasi")
     total_valid: int = Field(..., description="Jumlah produk valid yang berhasil diperingkatkan")
     total_excluded: int = Field(..., description="Jumlah produk yang dikecualikan dari perhitungan")
-    best_value: Optional[RankedProductItem] = Field(None, description="Produk dengan nilai ekonomi terbaik (Peringkat #1)")
-    ranked_items: List[RankedProductItem] = Field(default_factory=list, description="Daftar produk valid terurut dari nilai terbaik")
+    categories: List[CategoryRecommendationGroup] = Field(default_factory=list, description="Daftar kelompok rekomendasi per kategori")
     excluded_items: List[ExcludedProductItem] = Field(default_factory=list, description="Daftar produk yang dikecualikan dari perhitungan")
+
 
