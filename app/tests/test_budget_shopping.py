@@ -159,5 +159,171 @@ class TestBudgetShoppingAssistant(unittest.TestCase):
         self.assertIsNone(data["recommended_store"])
         self.assertEqual(data["items"], [])
 
+    def test_overbudget_returns_cheapest_store_and_items(self):
+        # Verified prices exist at store1 (20k + 15k = 35k) and store2 (15k + 14k = 29k).
+        # Both are over budget of 20k. Recommendation should return store2 (cheapest over-budget).
+        p1_s1 = PriceEntry(product_id=self.prod1_id, store_id=self.store1_id, harga=20000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s1 = PriceEntry(product_id=self.prod2_id, store_id=self.store1_id, harga=15000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        
+        p1_s2 = PriceEntry(product_id=self.prod1_id, store_id=self.store2_id, harga=15000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s2 = PriceEntry(product_id=self.prod2_id, store_id=self.store2_id, harga=14000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        self.db.add_all([p1_s1, p2_s1, p1_s2, p2_s2])
+        self.db.commit()
+
+        payload = {
+            "budget": 20000,
+            "items": [
+                {"product_id": self.prod1_id, "qty": 1},
+                {"product_id": self.prod2_id, "qty": 1}
+            ]
+        }
+        response = self.client.post("/budget-shopping/recommend", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertTrue(data["is_full_match"])
+        self.assertEqual(data["recommended_store"]["store_id"], self.store2_id)
+        self.assertEqual(data["total_cost"], 29000.0)
+        self.assertEqual(data["remaining_budget"], -9000.0)
+        self.assertEqual(len(data["items"]), 2)
+
+    def test_no_full_match_returns_availabilities(self):
+        # Product 1 is available at Store 1 (15k). Product 2 has no verified prices anywhere.
+        p1 = PriceEntry(product_id=self.prod1_id, store_id=self.store1_id, harga=15000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        self.db.add(p1)
+        self.db.commit()
+
+        payload = {
+            "budget": 50000,
+            "items": [
+                {"product_id": self.prod1_id, "qty": 1},
+                {"product_id": self.prod2_id, "qty": 1}
+            ]
+        }
+        response = self.client.post("/budget-shopping/recommend", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertFalse(data["is_full_match"])
+        self.assertIsNone(data["recommended_store"])
+        self.assertEqual(len(data["product_availabilities"]), 2)
+
+        p1_avail = next(x for x in data["product_availabilities"] if x["product_id"] == self.prod1_id)
+        self.assertTrue(p1_avail["is_available"])
+        self.assertEqual(p1_avail["harga_terendah"], 15000.0)
+        self.assertEqual(p1_avail["toko_terendah"], "Indomaret Gatsu")
+
+        p2_avail = next(x for x in data["product_availabilities"] if x["product_id"] == self.prod2_id)
+        self.assertFalse(p2_avail["is_available"])
+        self.assertIsNone(p2_avail["harga_terendah"])
+        self.assertIsNone(p2_avail["toko_terendah"])
+
+    def test_cheapest_full_match_store_is_selected_and_alternatives_sorted(self):
+        # Seed prices at Store 1 (cheapest: 10k + 10k = 20k) and Store 2 (expensive: 15k + 15k = 30k)
+        # Seed prices at Store 3 (middle: 12k + 12k = 24k)
+        # Store 3 is created dynamically in db. Let's create store3 in setUp or dynamically:
+        store3 = Store(nama="Karya Agung", alamat="Jl. Tengah", lat=-6.2300, lng=106.8400)
+        self.db.add(store3)
+        self.db.commit()
+
+        p1_s1 = PriceEntry(product_id=self.prod1_id, store_id=self.store1_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s1 = PriceEntry(product_id=self.prod2_id, store_id=self.store1_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        p1_s2 = PriceEntry(product_id=self.prod1_id, store_id=self.store2_id, harga=15000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s2 = PriceEntry(product_id=self.prod2_id, store_id=self.store2_id, harga=15000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        p1_s3 = PriceEntry(product_id=self.prod1_id, store_id=store3.id, harga=12000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s3 = PriceEntry(product_id=self.prod2_id, store_id=store3.id, harga=12000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        self.db.add_all([p1_s1, p2_s1, p1_s2, p2_s2, p1_s3, p2_s3])
+        self.db.commit()
+
+        payload = {
+            "budget": 50000,
+            "items": [
+                {"product_id": self.prod1_id, "qty": 1},
+                {"product_id": self.prod2_id, "qty": 1}
+            ]
+        }
+        response = self.client.post("/budget-shopping/recommend", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        # Store 1 (20k) is cheapest, so it MUST be recommended (instead of Store 2 or 3)
+        self.assertEqual(data["recommended_store"]["store_id"], self.store1_id)
+        self.assertEqual(data["total_cost"], 20000.0)
+
+        # Alternatives should contain Store 3 (24k) and Store 2 (30k) in sorted order
+        self.assertEqual(len(data["store_alternatives"]), 2)
+        self.assertEqual(data["store_alternatives"][0]["store_info"]["nama"], "Karya Agung") # Store 3
+        self.assertEqual(data["store_alternatives"][0]["total_cost"], 24000.0)
+        self.assertEqual(data["store_alternatives"][1]["store_info"]["nama"], "Alfamart Sudirman") # Store 2
+        self.assertEqual(data["store_alternatives"][1]["total_cost"], 30000.0)
+
+        # Primary store must NOT be duplicated in alternatives
+        self.assertNotIn(self.store1_id, [a["store_info"]["store_id"] for a in data["store_alternatives"]])
+
+    def test_quantity_greater_than_one_calculates_correct_totals(self):
+        # Qty = 2. Store 1 price = 10k (total 20k). Store 2 price = 12k (total 24k).
+        # We also have Roti at qty = 1. Store 1 = 15k (total 35k). Store 2 = 13k (total 37k).
+        p1_s1 = PriceEntry(product_id=self.prod1_id, store_id=self.store1_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s1 = PriceEntry(product_id=self.prod2_id, store_id=self.store1_id, harga=15000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        p1_s2 = PriceEntry(product_id=self.prod1_id, store_id=self.store2_id, harga=12000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s2 = PriceEntry(product_id=self.prod2_id, store_id=self.store2_id, harga=13000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        self.db.add_all([p1_s1, p2_s1, p1_s2, p2_s2])
+        self.db.commit()
+
+        payload = {
+            "budget": 50000,
+            "items": [
+                {"product_id": self.prod1_id, "qty": 2},
+                {"product_id": self.prod2_id, "qty": 1}
+            ]
+        }
+        response = self.client.post("/budget-shopping/recommend", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        # Store 1 should be recommended: (2 * 10k) + (1 * 15k) = 35k
+        self.assertEqual(data["recommended_store"]["store_id"], self.store1_id)
+        self.assertEqual(data["total_cost"], 35000.0)
+        self.assertEqual(data["remaining_budget"], 15000.0)
+
+        # Store 2 is alternative: (2 * 12k) + (1 * 13k) = 37k
+        self.assertEqual(len(data["store_alternatives"]), 1)
+        self.assertEqual(data["store_alternatives"][0]["store_info"]["store_id"], self.store2_id)
+        self.assertEqual(data["store_alternatives"][0]["total_cost"], 37000.0)
+
+    def test_equal_cost_has_deterministic_alphabetical_tie_breaker(self):
+        # Seed prices at Store 1 ("Indomaret Gatsu") and Store 2 ("Alfamart Gatsu").
+        # Both costs are identical (20k).
+        # Store 2 ("Alfamart Gatsu") must be selected as primary due to alphabetical ordering.
+        p1_s1 = PriceEntry(product_id=self.prod1_id, store_id=self.store1_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s1 = PriceEntry(product_id=self.prod2_id, store_id=self.store1_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        p1_s2 = PriceEntry(product_id=self.prod1_id, store_id=self.store2_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p2_s2 = PriceEntry(product_id=self.prod2_id, store_id=self.store2_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+
+        self.db.add_all([p1_s1, p2_s1, p1_s2, p2_s2])
+        self.db.commit()
+
+        payload = {
+            "budget": 50000,
+            "items": [
+                {"product_id": self.prod1_id, "qty": 1},
+                {"product_id": self.prod2_id, "qty": 1}
+            ]
+        }
+        response = self.client.post("/budget-shopping/recommend", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        # Alfamart Sudirman comes first alphabetically compared to Indomaret Gatsu
+        self.assertEqual(data["recommended_store"]["nama"], "Alfamart Sudirman")
+        self.assertEqual(data["store_alternatives"][0]["store_info"]["nama"], "Indomaret Gatsu")
+
 if __name__ == "__main__":
     unittest.main()

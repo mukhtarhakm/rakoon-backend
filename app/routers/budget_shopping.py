@@ -13,6 +13,8 @@ from app.models.schemas import (
     BudgetItemResult,
     StoreInfoOutput,
     VerificationStatus,
+    ProductAvailability,
+    AlternativeStoreOutput,
 )
 
 logger = logging.getLogger("rakoon_backend.budget_shopping")
@@ -126,8 +128,7 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
 
         # 5. Evaluasi Toko (Full Match & Cost Calculation)
         total_requested_count = len(requested_pids)
-        full_match_stores = []
-        full_match_costs = []
+        all_full_match_stores = []
 
         for sid, sdata in stores_data.items():
             items_map = sdata["items_map"]
@@ -152,22 +153,23 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
                         subtotal=subtotal
                     ))
 
-                full_match_costs.append(total_cost)
-
-                # Cek constraint total_cost <= budget
-                if total_cost <= user_budget:
-                    full_match_stores.append({
-                        "store_info": sdata["store_info"],
-                        "total_cost": total_cost,
-                        "remaining_budget": user_budget - total_cost,
-                        "item_results": item_results
-                    })
+                all_full_match_stores.append({
+                    "store_info": sdata["store_info"],
+                    "total_cost": total_cost,
+                    "remaining_budget": user_budget - total_cost,
+                    "item_results": item_results
+                })
 
         # 6. Skenario Penentuan Rekomendasi
         # Skenario A: Ada toko Full Match yang valid <= budget
-        if full_match_stores:
-            # Algoritma Pemilihan: Pilih total_cost TERBESAR yang masih <= budget (Max Utilization)
-            best_store_candidate = max(full_match_stores, key=lambda x: x["total_cost"])
+        within_budget_stores = [s for s in all_full_match_stores if s["total_cost"] <= user_budget]
+        if within_budget_stores:
+            # Algoritma Pemilihan: Pilih total_cost TERKECIL, break ties dengan store name secara alfabetis
+            within_budget_sorted = sorted(
+                within_budget_stores,
+                key=lambda x: (x["total_cost"], x["store_info"].nama)
+            )
+            best_store_candidate = within_budget_sorted[0]
             
             store_name = best_store_candidate["store_info"].nama
             cost_str = format_rupiah(best_store_candidate["total_cost"])
@@ -176,9 +178,21 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
 
             explanation = (
                 f"Rekomendasi Utama: {store_name} dapat memenuhi seluruh {total_requested_count} daftar barang "
-                f"kebutuhan Anda (100% Full Match) dengan total belanja {cost_str}. "
-                f"Pilihan ini paling optimal memanfaatkan budget {budget_str} Anda (Sisa budget {rem_str})."
+                f"kebutuhan Anda (100% Full Match) dengan total belanja termurah {cost_str}. "
+                f"Sisa budget Anda adalah {rem_str}."
             )
+
+            # Build store alternatives from remaining within-budget stores
+            alternatives = []
+            for alt in within_budget_sorted[1:3]:
+                alternatives.append(AlternativeStoreOutput(
+                    store_info=alt["store_info"],
+                    total_cost=alt["total_cost"],
+                    remaining_budget=alt["remaining_budget"],
+                    is_full_match=True,
+                    matched_products_count=total_requested_count,
+                    items=alt["item_results"]
+                ))
 
             return BudgetRecommendResponse(
                 budget=user_budget,
@@ -187,30 +201,75 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
                 is_full_match=True,
                 recommended_store=best_store_candidate["store_info"],
                 items=best_store_candidate["item_results"],
-                explanation=explanation
+                explanation=explanation,
+                store_alternatives=alternatives
             )
 
         # Skenario B: Ada toko Full Match tetapi SEMUA total_cost > budget
-        if full_match_costs:
-            cheapest_cost = min(full_match_costs)
+        if all_full_match_stores:
+            over_budget_sorted = sorted(
+                all_full_match_stores,
+                key=lambda x: (x["total_cost"], x["store_info"].nama)
+            )
+            cheapest_overbudget_store = over_budget_sorted[0]
+            store_name = cheapest_overbudget_store["store_info"].nama
+            cheapest_cost = cheapest_overbudget_store["total_cost"]
             shortage = cheapest_cost - user_budget
+            
             explanation = (
                 f"Budget {format_rupiah(user_budget)} tidak mencukupi untuk membeli seluruh barang kebutuhan di toko mana pun. "
                 f"Estimasi total belanja termurah yang memiliki 100% barang Anda adalah {format_rupiah(cheapest_cost)} "
-                f"(Kurang {format_rupiah(shortage)}). Kurangi kuantitas barang atau naikkan budget."
+                f"di {store_name} (Kurang {format_rupiah(shortage)}). Kurangi kuantitas barang atau naikkan budget."
             )
+
+            # Alternatives for over-budget stores
+            alternatives = []
+            for alt in over_budget_sorted[1:3]:
+                alternatives.append(AlternativeStoreOutput(
+                    store_info=alt["store_info"],
+                    total_cost=alt["total_cost"],
+                    remaining_budget=alt["remaining_budget"],
+                    is_full_match=True,
+                    matched_products_count=total_requested_count,
+                    items=alt["item_results"]
+                ))
 
             return BudgetRecommendResponse(
                 budget=user_budget,
-                total_cost=0.0,
-                remaining_budget=user_budget,
-                is_full_match=False,
-                recommended_store=None,
-                items=[],
-                explanation=explanation
+                total_cost=cheapest_cost,
+                remaining_budget=user_budget - cheapest_cost,
+                is_full_match=True,
+                recommended_store=cheapest_overbudget_store["store_info"],
+                items=cheapest_overbudget_store["item_results"],
+                explanation=explanation,
+                store_alternatives=alternatives
             )
 
         # Skenario C: Tidak ada toko yang memuat 100% barang di database
+        availabilities = []
+        for pid in requested_pids:
+            product_rows = [row for row in query_results if str(row.product_id) == pid]
+            if product_rows:
+                cheapest_row = min(product_rows, key=lambda x: x.harga)
+                prod_name = cheapest_row.nama_produk or "Produk Tanpa Nama"
+                availabilities.append(ProductAvailability(
+                    product_id=pid,
+                    nama_produk=prod_name,
+                    is_available=True,
+                    harga_terendah=float(cheapest_row.harga),
+                    toko_terendah=cheapest_row.nama_toko or "Toko"
+                ))
+            else:
+                prod_db = db.query(Product).filter(Product.id == pid).first()
+                prod_name = prod_db.nama if prod_db else "Produk Tidak Dikenal"
+                availabilities.append(ProductAvailability(
+                    product_id=pid,
+                    nama_produk=prod_name,
+                    is_available=False,
+                    harga_terendah=None,
+                    toko_terendah=None
+                ))
+
         explanation = (
             f"Tidak ditemukan toko di database yang menjual seluruh ({total_requested_count}) daftar barang "
             f"kebutuhan Anda sekaligus secara lengkap."
@@ -223,7 +282,8 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
             is_full_match=False,
             recommended_store=None,
             items=[],
-            explanation=explanation
+            explanation=explanation,
+            product_availabilities=availabilities
         )
 
     except HTTPException:

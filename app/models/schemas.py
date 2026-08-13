@@ -225,6 +225,21 @@ class StoreInfoOutput(BaseModel):
     lat: Optional[float] = Field(None, description="Latitude lokasi toko")
     lng: Optional[float] = Field(None, description="Longitude lokasi toko")
 
+class ProductAvailability(BaseModel):
+    product_id: str = Field(..., description="ID produk")
+    nama_produk: str = Field(..., description="Nama produk")
+    is_available: bool = Field(..., description="True jika produk tersedia di setidaknya satu toko")
+    harga_terendah: Optional[float] = Field(None, description="Harga terendah produk di toko yang menyediakannya")
+    toko_terendah: Optional[str] = Field(None, description="Nama toko yang memiliki harga terendah tersebut")
+
+class AlternativeStoreOutput(BaseModel):
+    store_info: StoreInfoOutput
+    total_cost: float = Field(..., description="Total biaya belanja di toko alternatif")
+    remaining_budget: float = Field(..., description="Sisa budget di toko alternatif")
+    is_full_match: bool = Field(..., description="True jika toko memiliki 100% barang")
+    matched_products_count: int = Field(..., description="Jumlah barang yang cocok")
+    items: List[BudgetItemResult] = Field(default_factory=list, description="Rincian item belanja di toko alternatif")
+
 class BudgetRecommendResponse(BaseModel):
     budget: float = Field(..., description="Total budget pengguna")
     total_cost: float = Field(..., description="Total biaya belanja di toko rekomendasi")
@@ -233,5 +248,7 @@ class BudgetRecommendResponse(BaseModel):
     recommended_store: Optional[StoreInfoOutput] = Field(None, description="Toko yang direkomendasikan (null jika tidak ada Full Match / budget kurang)")
     items: List[BudgetItemResult] = Field(default_factory=list, description="Rincian item belanja di toko rekomendasi")
     explanation: str = Field(..., description="Penjelasan rinci hasil rekomendasi budget shopping")
+    product_availabilities: Optional[List[ProductAvailability]] = Field(None, description="Rincian ketersediaan produk jika tidak ada full match")
+    store_alternatives: Optional[List[AlternativeStoreOutput]] = Field(None, description="Toko alternatif selain rekomendasi utama")
 
 
