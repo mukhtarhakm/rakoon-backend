@@ -80,24 +80,37 @@ class TestPriceHistoryBackend(unittest.TestCase):
     def test_service_get_price_history_normal(self):
         res = get_price_history(self.db, product_id=self.prod_id1)
         self.assertEqual(str(res.product_id), self.prod_id1)
+        self.assertEqual(res.product_name, "Susu UHT 1L")
         self.assertEqual(res.total, 4)
         self.assertEqual(len(res.items), 4)
         self.assertGreater(len(res.trend), 0)
+        for item in res.items:
+            if str(item.store_id) == self.store_id1:
+                self.assertEqual(item.store_name, "Indomaret Sudirman")
+            elif str(item.store_id) == self.store_id2:
+                self.assertEqual(item.store_name, "Alfamart Gatot Subroto")
 
     def test_service_get_scan_price_history_entries(self):
         entries = get_scan_price_history_entries(self.db, product_id=self.prod_id1, store_id=self.store_id1)
         self.assertEqual(len(entries), 3)
         for entry in entries:
             self.assertEqual(str(entry.store_id), self.store_id1)
+            self.assertEqual(entry.store_name, "Indomaret Sudirman")
 
     def test_endpoint_get_price_history_success(self):
         response = self.client.get(f"/price/api/v1/products/{self.prod_id1}/price-history")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(str(data["product_id"]), self.prod_id1)
+        self.assertEqual(data["product_name"], "Susu UHT 1L")
         self.assertEqual(data["total"], 4)
         self.assertEqual(len(data["items"]), 4)
         self.assertEqual(len(data["trend"]), 3)
+        for item in data["items"]:
+            if str(item["store_id"]) == self.store_id1:
+                self.assertEqual(item["store_name"], "Indomaret Sudirman")
+            elif str(item["store_id"]) == self.store_id2:
+                self.assertEqual(item["store_name"], "Alfamart Gatot Subroto")
         for item in data["items"]:
             self.assertNotIn("sumber_user_id", item)
 
@@ -129,6 +142,7 @@ class TestPriceHistoryBackend(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(str(data["product_id"]), self.prod_id2)
+        self.assertEqual(data["product_name"], "Kopi Tubruk 200g")
         self.assertEqual(data["total"], 0)
         self.assertEqual(data["items"], [])
         self.assertEqual(data["trend"], [])

@@ -96,6 +96,7 @@ class PriceHistoryItem(BaseModel):
     id: Union[UUID, int, str] = Field(..., description="ID entri harga")
     product_id: Union[UUID, int, str] = Field(..., description="ID produk")
     store_id: Union[UUID, str] = Field(..., description="ID toko tempat harga dicatat")
+    store_name: Optional[str] = Field(None, description="Nama toko tempat harga dicatat")
     harga: int = Field(..., description="Harga produk (satuan: Rupiah)")
     # ORM column name is `timestamp`; exposed publicly as `recorded_at`
     recorded_at: datetime = Field(..., alias="timestamp", description="Waktu harga dicatat")
@@ -117,6 +118,7 @@ class PriceHistoryResponse(BaseModel):
     """Response wrapper untuk daftar riwayat harga satu produk."""
 
     product_id: Union[UUID, int, str] = Field(..., description="ID produk yang diminta")
+    product_name: str = Field(..., description="Nama produk yang diminta")
     total: int = Field(..., description="Jumlah total entri yang dikembalikan")
     items: List[PriceHistoryItem] = Field(default_factory=list, description="Daftar entri riwayat harga")
     trend: List[PriceTrendPoint] = Field(default_factory=list, description="Daftar titik data grafik tren harga")

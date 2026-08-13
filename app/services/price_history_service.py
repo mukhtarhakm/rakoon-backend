@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.db_models import PriceEntry, Product
+from app.models.db_models import PriceEntry, Product, Store
 from app.models.schemas import PriceHistoryItem, PriceHistoryResponse, PriceTrendPoint, VerificationStatus
 
 
@@ -165,9 +165,9 @@ def get_price_history(
     prod_id_str = str(product_id)
 
     # 1. Validasi keberadaan produk
-    product_exists = db.query(Product.id).filter(Product.id == prod_id_str).first()
+    product = db.query(Product).filter(Product.id == prod_id_str).first()
     
-    if not product_exists:
+    if not product:
         raise ValueError(f"Produk dengan ID {product_id} tidak ditemukan.")
 
     # 2. Bangun query dasar (mengecualikan 'rejected')
@@ -190,14 +190,31 @@ def get_price_history(
     # 5. Urutkan ascending (timestamp lama → baru) agar grafik tren konsisten
     records: List[PriceEntry] = query.order_by(PriceEntry.timestamp.asc()).all()
 
+    # 5b. Ambil nama toko dari database untuk masing-masing store_id
+    store_ids = {r.store_id for r in records}
+    stores = db.query(Store).filter(Store.id.in_(store_ids)).all() if store_ids else []
+    store_name_map = {s.id: s.nama for s in stores}
+
     # 6. Serialisasi ke Pydantic (alias timestamp → recorded_at)
-    items = [PriceHistoryItem.model_validate(r) for r in records]
+    items = [
+        PriceHistoryItem(
+            id=r.id,
+            product_id=r.product_id,
+            store_id=r.store_id,
+            store_name=store_name_map.get(r.store_id, f"Toko {r.store_id[:8]}" if len(r.store_id) > 8 else f"Toko {r.store_id}"),
+            harga=r.harga,
+            recorded_at=r.timestamp,
+            status_verifikasi=r.status_verifikasi,
+        )
+        for r in records
+    ]
 
     # 7. Hitung data tren harga untuk grafik (Task B3)
     trend = calculate_price_trend(items)
 
     return PriceHistoryResponse(
         product_id=product_id,
+        product_name=product.nama,
         total=len(items),
         items=items,
         trend=trend,
@@ -237,6 +254,22 @@ def get_scan_price_history_entries(
         query = query.filter(PriceEntry.store_id == store_id)
 
     records: List[PriceEntry] = query.order_by(PriceEntry.timestamp.asc()).all()
-    return [PriceHistoryItem.model_validate(r) for r in records]
+
+    store_ids = {r.store_id for r in records}
+    stores = db.query(Store).filter(Store.id.in_(store_ids)).all() if store_ids else []
+    store_name_map = {s.id: s.nama for s in stores}
+
+    return [
+        PriceHistoryItem(
+            id=r.id,
+            product_id=r.product_id,
+            store_id=r.store_id,
+            store_name=store_name_map.get(r.store_id, f"Toko {r.store_id[:8]}" if len(r.store_id) > 8 else f"Toko {r.store_id}"),
+            harga=r.harga,
+            recorded_at=r.timestamp,
+            status_verifikasi=r.status_verifikasi,
+        )
+        for r in records
+    ]
 
 
