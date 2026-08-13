@@ -276,55 +276,101 @@ async def get_price_comparison(
         stores_response = await get_nearby_stores(lat=lat, lng=lng, radius_km=radius_km, db=db)
         nearby_stores = stores_response.stores
 
-        # 4. Ambil harga terbaru dari tiap toko
+        # 4. Batch-fetch latest verified price entry per store (single SQL query, no N+1)
+        #    Strategy: subquery selects MAX(timestamp) per store_id for this product,
+        #    then we join back to get the full PriceEntry row.
+        store_ids = [store.store_id for store in nearby_stores]
+
+        latest_prices: dict[str, "PriceEntry"] = {}
+        if store_ids:
+            from sqlalchemy import func, and_
+            from sqlalchemy.orm import aliased
+
+            # Subquery: for each store, find the latest non-rejected timestamp
+            sub = (
+                db.query(
+                    PriceEntry.store_id.label("store_id"),
+                    func.max(PriceEntry.timestamp).label("max_ts"),
+                )
+                .filter(
+                    PriceEntry.product_id == prod_id_parsed,
+                    PriceEntry.store_id.in_(store_ids),
+                    PriceEntry.status_verifikasi != VerificationStatus.REJECTED,
+                )
+                .group_by(PriceEntry.store_id)
+                .subquery()
+            )
+
+            # Main query: join PriceEntry to the subquery on (store_id, timestamp)
+            pe_alias = aliased(PriceEntry)
+            rows = (
+                db.query(pe_alias)
+                .join(
+                    sub,
+                    and_(
+                        pe_alias.store_id == sub.c.store_id,
+                        pe_alias.timestamp == sub.c.max_ts,
+                    ),
+                )
+                .filter(pe_alias.product_id == prod_id_parsed)
+                .all()
+            )
+
+            # Build lookup dict: store_id → PriceEntry
+            for row in rows:
+                latest_prices[str(row.store_id)] = row
+
+        # 5. Build comparison list using O(1) dict lookup per store
         comparison_list = []
         for store in nearby_stores:
-            # Query harga terupdate (order by timestamp DESC, mengecualikan 'rejected')
-            latest_entry = db.query(PriceEntry).filter(
-                PriceEntry.product_id == prod_id_parsed,
-                PriceEntry.store_id == store.store_id,
-                PriceEntry.status_verifikasi != VerificationStatus.REJECTED
-            ).order_by(PriceEntry.timestamp.desc()).first()
+            entry = latest_prices.get(store.store_id)
 
-            if latest_entry:
+            if entry:
                 comparison_list.append(
                     PriceCompareItem(
+                        store_id=store.store_id,
                         nama_toko=store.nama,
+                        lat=store.lat,
+                        lng=store.lng,
                         jarak_km=store.jarak_km,
-                        harga_terbaru=latest_entry.harga,
-                        tanggal_update=latest_entry.timestamp,
-                        status_verifikasi=latest_entry.status_verifikasi,
-                        pesan=None
+                        harga_terbaru=entry.harga,
+                        tanggal_update=entry.timestamp,
+                        status_verifikasi=entry.status_verifikasi,
+                        pesan=None,
                     )
                 )
             else:
-                # Jika tidak ada data harga, tetap tampilkan dengan harga null dan keterangan
+                # Store has no price data — still include with coordinates
                 comparison_list.append(
                     PriceCompareItem(
+                        store_id=store.store_id,
                         nama_toko=store.nama,
+                        lat=store.lat,
+                        lng=store.lng,
                         jarak_km=store.jarak_km,
                         harga_terbaru=None,
                         tanggal_update=None,
                         status_verifikasi=None,
-                        pesan="Belum ada data untuk produk ini di toko ini"
+                        pesan="Belum ada data untuk produk ini di toko ini",
                     )
                 )
 
-        # 5. Urutkan: harga termurah dahulu (harga terendah -> tertinggi), data kosong (harga None) ditaruh di akhir.
-        # Jika harga sama, diurutkan berdasarkan jarak terdekat.
+        # 6. Sort: cheapest first, None-price last; tie-break by jarak_km (deterministic)
         comparison_list.sort(
             key=lambda x: (
                 x.harga_terbaru is None,
                 x.harga_terbaru if x.harga_terbaru is not None else 0,
-                x.jarak_km
+                x.jarak_km,
+                x.store_id,  # final deterministic tie-break
             )
         )
 
         return PriceCompareResponse(
             product_id=prod_id_parsed,
             nama_produk=product.nama,
-            comparison=comparison_list
+            comparison=comparison_list,
         )
+
 
     except HTTPException:
         raise

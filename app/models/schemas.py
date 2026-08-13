@@ -129,7 +129,10 @@ class PriceHistoryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class PriceCompareItem(BaseModel):
+    store_id: str = Field(..., description="ID toko")
     nama_toko: str = Field(..., description="Nama toko")
+    lat: float = Field(..., description="Latitude toko")
+    lng: float = Field(..., description="Longitude toko")
     jarak_km: float = Field(..., description="Jarak dari titik user dalam km")
     harga_terbaru: Optional[int] = Field(None, description="Harga terbaru produk di toko ini")
     tanggal_update: Optional[datetime] = Field(None, description="Tanggal update harga terbaru")
@@ -140,6 +143,7 @@ class PriceCompareResponse(BaseModel):
     product_id: Union[int, str] = Field(..., description="ID dari produk")
     nama_produk: str = Field(..., description="Nama produk")
     comparison: List[PriceCompareItem] = Field(default_factory=list, description="Daftar perbandingan harga di toko terdekat")
+
 
 # ==============================================================================
 # FEATURE 2: BEST VALUE RECOMMENDATION SCHEMAS
