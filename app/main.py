@@ -28,7 +28,7 @@ app.include_router(auth.router, prefix="/auth", tags=["auth"])
 
 @app.get("/")
 @app.get("/health")
-def health_check():
+async def health_check():
     """
     Health check endpoint untuk memastikan server berjalan dengan baik.
     """
