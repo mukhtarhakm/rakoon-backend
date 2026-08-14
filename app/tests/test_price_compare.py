@@ -95,12 +95,16 @@ class TestPriceCompare(unittest.TestCase):
             os.remove("./test_price_compare.db")
 
     def setUp(self):
+        from app.dependencies import get_current_user
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: "00000000-0000-0000-0000-000000000001"
         db = TestingSessionLocal()
         db.query(PriceEntry).delete()
         db.query(Product).delete()
         db.query(Store).delete()
         db.commit()
         db.close()
+
 
     # -----------------------------------------------------------------------
     # 1. Response contains store_id

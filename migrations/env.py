@@ -21,7 +21,8 @@ if not db_url:
 else:
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
-config.set_main_option("sqlalchemy.url", db_url)
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
+
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

@@ -32,14 +32,13 @@ def override_get_db():
         db.close()
 
 
-app.dependency_overrides[get_db] = override_get_db
-
-
 class TestPriceHistoryBackend(unittest.TestCase):
 
     def setUp(self):
         Base.metadata.create_all(bind=engine)
         self.db = TestingSessionLocal()
+        app.dependency_overrides[get_db] = override_get_db
+
 
         self.prod_id1 = "d1111111-1111-1111-1111-111111111111"
         self.prod_id2 = "d2222222-2222-2222-2222-222222222222"
@@ -76,6 +75,8 @@ class TestPriceHistoryBackend(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         Base.metadata.drop_all(bind=engine)
+        app.dependency_overrides.clear()
+
 
     def test_service_get_price_history_normal(self):
         res = get_price_history(self.db, product_id=self.prod_id1)

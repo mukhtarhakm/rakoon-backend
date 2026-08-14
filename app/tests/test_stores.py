@@ -46,6 +46,9 @@ class TestStores(unittest.TestCase):
             os.remove("./test_rakoon.db")
 
     def setUp(self):
+        from app.dependencies import get_current_user
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: "b5b07384-d113-4956-b51c-43f11075d655"
         # Clean the tables before each test
         db = TestingSessionLocal()
         db.query(PriceEntry).delete()
@@ -53,6 +56,7 @@ class TestStores(unittest.TestCase):
         db.query(Store).delete()
         db.commit()
         db.close()
+
 
     def test_create_store_success(self):
         response = self.client.post(
