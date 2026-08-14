@@ -3,12 +3,15 @@ import base64
 import json
 import re
 import logging
-from typing import Optional, List
+from datetime import datetime
+from typing import Optional, List, Union
+from uuid import UUID
 import httpx
-from fastapi import APIRouter, File, UploadFile, HTTPException, status, Depends
+from fastapi import APIRouter, File, UploadFile, HTTPException, Query, status, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse, ProductCategory, VerificationStatus
-from app.models.db_models import Product, PriceEntry
+from app.models.db_models import Product, PriceEntry, Store
 from app.database import get_db
 from app.dependencies import get_current_user
 
@@ -415,3 +418,61 @@ def confirm_scan_results(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Terjadi kesalahan saat menyimpan konfirmasi: {str(e)}"
         )
+
+
+class RecentScanItem(BaseModel):
+    id: str = Field(..., description="ID entri harga")
+    product_id: str = Field(..., description="ID produk")
+    nama_produk: str = Field(..., description="Nama produk")
+    kategori: str = Field(..., description="Kategori produk")
+    ukuran: Optional[float] = Field(None, description="Ukuran produk")
+    satuan: Optional[str] = Field(None, description="Satuan ukuran")
+    harga: int = Field(..., description="Harga produk")
+    store_id: str = Field(..., description="ID toko")
+    store_name: Optional[str] = Field(None, description="Nama toko")
+    timestamp: datetime = Field(..., description="Waktu scan disimpan")
+    status_verifikasi: str = Field(..., description="Status verifikasi")
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/recent", response_model=List[RecentScanItem], status_code=status.HTTP_200_OK)
+def get_recent_scans(
+    limit: int = Query(10, description="Maksimum jumlah scan terbaru yang diambil"),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Mengambil riwayat scan terbaru milik user yang terotentikasi (sumber_user_id == user_id).
+    Diurutkan berdasarkan timestamp DESC (terbaru lebih dulu).
+    """
+    rows = (
+        db.query(PriceEntry, Product, Store)
+        .join(Product, PriceEntry.product_id == Product.id)
+        .outerjoin(Store, PriceEntry.store_id == Store.id)
+        .filter(PriceEntry.sumber_user_id == user_id)
+        .order_by(PriceEntry.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+
+    results = []
+    for entry, product, store in rows:
+        store_name = store.nama if store else f"Toko {str(entry.store_id)[:8]}"
+        results.append(
+            RecentScanItem(
+                id=str(entry.id),
+                product_id=str(product.id),
+                nama_produk=product.nama,
+                kategori=product.kategori,
+                ukuran=product.ukuran,
+                satuan=product.satuan,
+                harga=entry.harga,
+                store_id=str(entry.store_id),
+                store_name=store_name,
+                timestamp=entry.timestamp,
+                status_verifikasi=entry.status_verifikasi,
+            )
+        )
+    return results
+
