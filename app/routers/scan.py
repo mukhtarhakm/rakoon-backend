@@ -3,18 +3,35 @@ import base64
 import json
 import re
 import logging
-from typing import Optional, List
+from datetime import datetime, timezone
+from typing import Optional, List, Union
+from uuid import UUID
+
 import httpx
-from fastapi import APIRouter, File, UploadFile, HTTPException, status, Depends
+from fastapi import APIRouter, File, UploadFile, HTTPException, Query, status, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.models.schemas import ScanResponse, ScanResultItem, ConfirmRequest, ConfirmResponse, ProductCategory, VerificationStatus
-from app.models.db_models import Product, PriceEntry
+from app.models.schemas import (
+    ScanResponse,
+    ScanResultItem,
+    ConfirmRequest,
+    ConfirmResponse,
+    ProductCategory,
+    VerificationStatus,
+    RecentScanItem,
+    ScanSessionProductItem,
+    ScanSessionDetailResponse,
+)
+from app.models.db_models import Product, PriceEntry, Store, ScanSession
 from app.database import get_db
 from app.dependencies import get_current_user
+
 
 logger = logging.getLogger("rakoon_backend.scan")
 
 router = APIRouter()
+
 
 def normalize_and_validate_category(val) -> str:
     cleaned = clean_str(val)
@@ -347,17 +364,27 @@ def confirm_scan_results(
     """
     Menyimpan hasil scan produk ke database setelah dikonfirmasi atau dikoreksi oleh user di frontend.
     Jika produk belum terdaftar di tabel 'products' (berdasarkan nama case-insensitive), produk baru akan dibuat.
-    Setiap entri harga akan disimpan ke tabel 'price_entries' dengan status 'pending'.
+    Setiap entri harga akan disimpan ke tabel 'price_entries' yang diasosiasikan dengan satu 'scan_sessions'.
     """
     items_saved = 0
     products_created = 0
     
     try:
+        now_utc = datetime.now(timezone.utc)
+        # 1. Buat satu scan_session untuk batch konfirmasi ini
+        scan_session = ScanSession(
+            user_id=user_id,
+            store_id=str(request_data.store_id),
+            created_at=now_utc
+        )
+        db.add(scan_session)
+        db.flush() # Flush untuk mendapatkan generated ID scan_session
+        
         for item in request_data.items:
             product_id = None
             clean_name = item.nama_produk.strip()
             
-            # 1. Cek apakah produk dengan nama yang sama sudah ada di tabel products (case-insensitive match)
+            # Cek apakah produk dengan nama yang sama sudah ada di tabel products (case-insensitive match)
             # Cek di session's new objects terlebih dahulu untuk menghindari duplikasi dalam batch yang sama
             product = None
             for obj in db.new:
@@ -387,25 +414,29 @@ def confirm_scan_results(
                 product_id = new_product.id
                 products_created += 1
                 
-            # 2. Insert ke tabel price_entries untuk tiap item
+            # Insert ke tabel price_entries untuk tiap item dengan scan_session_id
             price_entry = PriceEntry(
                 product_id=product_id,
                 store_id=str(request_data.store_id),
                 harga=item.harga,
                 sumber_user_id=user_id,
-                status_verifikasi=VerificationStatus.VERIFIED
+                status_verifikasi=VerificationStatus.VERIFIED,
+                scan_session_id=scan_session.id,
+                timestamp=now_utc
             )
             db.add(price_entry)
             items_saved += 1
+
             
-        # Commit seluruh perubahan sekaligus
+        # Commit seluruh perubahan sekaligus secara atomic
         db.commit()
         
         message = f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru."
         return ConfirmResponse(
             items_saved=items_saved,
             products_created=products_created,
-            message=message
+            message=message,
+            scan_session_id=str(scan_session.id)
         )
         
     except Exception as e:
@@ -415,3 +446,110 @@ def confirm_scan_results(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Terjadi kesalahan saat menyimpan konfirmasi: {str(e)}"
         )
+
+
+@router.get("/recent", response_model=List[RecentScanItem], status_code=status.HTTP_200_OK)
+def get_recent_scans(
+    limit: int = Query(10, description="Maksimum jumlah scan terbaru yang diambil"),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Mengambil riwayat scan terbaru milik user yang terotentikasi (user_id == user_id) berbasis scan_sessions.
+    Diurutkan berdasarkan timestamp DESC (terbaru lebih dulu).
+    """
+    rows = (
+        db.query(
+            ScanSession,
+            Store,
+            func.count(PriceEntry.id).label("product_count")
+        )
+        .outerjoin(Store, ScanSession.store_id == Store.id)
+        .outerjoin(PriceEntry, PriceEntry.scan_session_id == ScanSession.id)
+        .filter(ScanSession.user_id == user_id)
+        .group_by(ScanSession.id, Store.id)
+        .order_by(ScanSession.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    results = []
+    for session, store, product_count in rows:
+        store_name = store.nama if store else f"Toko {str(session.store_id)[:8]}"
+        ts = session.created_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        results.append(
+            RecentScanItem(
+                id=str(session.id),
+                store_id=str(session.store_id),
+                store_name=store_name,
+                timestamp=ts,
+                product_count=product_count or 0,
+            )
+        )
+    return results
+
+
+@router.get("/session/{session_id}", response_model=ScanSessionDetailResponse, status_code=status.HTTP_200_OK)
+def get_scan_session_detail(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Mengambil detail scan session tertentu milik user yang terotentikasi.
+    Memverifikasi kepemilikan session (scan_session.user_id == user_id).
+    Jika session tidak ditemukan atau bukan milik user, mengembalikan 404.
+    """
+    session = (
+        db.query(ScanSession)
+        .filter(ScanSession.id == session_id, ScanSession.user_id == user_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sesi scan tidak ditemukan."
+        )
+
+    store = db.query(Store).filter(Store.id == session.store_id).first()
+    store_name = store.nama if store else f"Toko {str(session.store_id)[:8]}"
+
+    # Query price entries with product details
+    price_entries = (
+        db.query(PriceEntry, Product)
+        .join(Product, PriceEntry.product_id == Product.id)
+        .filter(PriceEntry.scan_session_id == session.id)
+        .all()
+    )
+
+    items = []
+    for pe, product in price_entries:
+        items.append(
+            ScanSessionProductItem(
+                product_id=str(product.id),
+                nama_produk=product.nama,
+                kategori=product.kategori,
+                ukuran=product.ukuran,
+                satuan=product.satuan,
+                harga=pe.harga,
+            )
+        )
+
+    ts = session.created_at
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    return ScanSessionDetailResponse(
+        id=str(session.id),
+        store_id=str(session.store_id),
+        store_name=store_name,
+        timestamp=ts,
+        product_count=len(items),
+        items=items,
+    )
+
+
+
+

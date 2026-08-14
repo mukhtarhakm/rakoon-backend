@@ -85,6 +85,40 @@ class ConfirmResponse(BaseModel):
     items_saved: int = Field(..., description="Jumlah entri harga yang berhasil disimpan")
     products_created: int = Field(..., description="Jumlah produk baru yang berhasil dibuat")
     message: str = Field(..., description="Pesan status konfirmasi")
+    scan_session_id: Optional[str] = Field(None, description="ID sesi scan yang dibuat")
+
+class RecentScanItem(BaseModel):
+    id: str = Field(..., description="ID scan session")
+    store_id: str = Field(..., description="ID toko")
+    store_name: Optional[str] = Field(None, description="Nama toko")
+    timestamp: datetime = Field(..., description="Waktu sesi scan")
+    product_count: int = Field(..., description="Jumlah produk yang dipindai dalam sesi")
+
+    model_config = {"from_attributes": True}
+
+
+class ScanSessionProductItem(BaseModel):
+    product_id: str = Field(..., description="ID produk")
+    nama_produk: str = Field(..., description="Nama produk")
+    kategori: str = Field(..., description="Kategori produk")
+    ukuran: Optional[float] = Field(None, description="Ukuran produk")
+    satuan: Optional[str] = Field(None, description="Satuan ukuran")
+    harga: int = Field(..., description="Harga produk dalam sesi ini")
+
+    model_config = {"from_attributes": True}
+
+
+class ScanSessionDetailResponse(BaseModel):
+    id: str = Field(..., description="ID scan session")
+    store_id: str = Field(..., description="ID toko")
+    store_name: Optional[str] = Field(None, description="Nama toko")
+    timestamp: datetime = Field(..., description="Waktu sesi scan")
+    product_count: int = Field(..., description="Jumlah total produk dalam sesi")
+    items: List[ScanSessionProductItem] = Field(default_factory=list, description="Daftar produk dalam sesi scan")
+
+    model_config = {"from_attributes": True}
+
+
 
 # ---------------------------------------------------------------------------
 # F3 — Price History Schemas

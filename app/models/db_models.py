@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid
 from sqlalchemy.orm import relationship
@@ -21,6 +21,7 @@ class Store(Base):
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
 
+
 class Product(Base):
     __tablename__ = "products"
     
@@ -33,6 +34,18 @@ class Product(Base):
     # Relationship to price entries
     price_entries = relationship("PriceEntry", back_populates="product", cascade="all, delete-orphan")
 
+class ScanSession(Base):
+    __tablename__ = "scan_sessions"
+    
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
+    store_id = Column(Uuid(as_uuid=False), ForeignKey("stores.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    
+    # Relationships
+    store = relationship("Store")
+    price_entries = relationship("PriceEntry", back_populates="scan_session", cascade="all, delete-orphan")
+
 class PriceEntry(Base):
     __tablename__ = "price_entries"
     
@@ -41,8 +54,10 @@ class PriceEntry(Base):
     store_id = Column(Uuid(as_uuid=False), nullable=False)
     harga = Column(Integer, nullable=False)
     sumber_user_id = Column(Uuid(as_uuid=False), nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     status_verifikasi = Column(String, default="pending", nullable=False)
+    scan_session_id = Column(Uuid(as_uuid=False), ForeignKey("scan_sessions.id"), nullable=True, index=True)
     
-    # Relationship to product
+    # Relationships
     product = relationship("Product", back_populates="price_entries")
+    scan_session = relationship("ScanSession", back_populates="price_entries")
