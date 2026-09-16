@@ -182,7 +182,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
         )
 
     # 4. Kirim request ke Groq API (OpenAI Compatible Endpoint)
-    groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
+    groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
     url = "https://api.groq.com/openai/v1/chat/completions"
     
     headers = {
