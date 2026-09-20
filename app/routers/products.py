@@ -18,9 +18,7 @@ class ProductOut(BaseModel):
     ukuran: Optional[float] = Field(None, description="Ukuran/volume/berat produk")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (gr, ml, dll)")
 
-    class Config:
-        orm_mode = True
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 @router.get("/", response_model=List[ProductOut], status_code=status.HTTP_200_OK)
 def get_products(

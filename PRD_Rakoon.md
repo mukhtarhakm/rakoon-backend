@@ -99,7 +99,7 @@ Masyarakat umum, keluarga, mahasiswa, dan pekerja kantoran yang berbelanja rutin
 2. Sistem meminta izin lokasi & kamera (dengan penjelasan alasan penggunaan).
 3. GPS mendeteksi lokasi supermarket (via Overpass API, dicocokkan dengan data OpenStreetMap).
 4. Pengguna mengarahkan kamera ke rak produk dan mengambil foto.
-5. Foto dikirim ke Gemini API untuk pengenalan produk + pembacaan harga (OCR).
+5. Foto dikirim ke AI Vision Pipeline (First-Pass: gpt-5.6-luna, Verifikasi bersyarat: gpt-5.6-terra) untuk pengenalan produk + pembacaan harga (OCR).
 6. Sistem mencocokkan hasil dengan database produk/toko yang ada.
 7. Sistem menghitung nilai ekonomi tiap produk.
 8. Rekomendasi & data terkait ditampilkan ke pengguna secara real-time.
@@ -121,7 +121,9 @@ Masyarakat umum, keluarga, mahasiswa, dan pekerja kantoran yang berbelanja rutin
 
 - **Frontend:** Flutter
 - **Backend & Database:** Supabase (PostgreSQL, Auth, Storage)
-- **AI (Vision + OCR):** Gemini API — pakai model **Flash / Flash-Lite** (gratis via Google AI Studio, tanpa kartu kredit, cukup untuk development & MVP). Model **Pro** berbayar sejak April 2026, dihindari dulu kecuali akurasi Flash tidak cukup.
+- **AI (Vision + OCR):** Two-Pass Hierarchical Vision Architecture:
+  - **Model Utama (First-Pass): `gpt-5.6-luna`** — Mendukung image input/vision untuk semua foto rak supermarket. Dioptimalkan untuk beban kerja bervolume tinggi (*high-volume*) dan efisiensi biaya (*cost-sensitive*): \$0.20 per 1 juta input token dan \$1.20 per 1 juta output token.
+  - **Model Verifikasi: `gpt-5.6-terra`** — Memiliki kemampuan penalaran (*deep reasoning*) lebih tinggi dengan biaya \$2 per 1 juta input token dan \$12 per 1 juta output token (~10x Luna). Hanya dipanggil saat hasil Luna menunjukkan ketidakpastian (*low confidence*) atau informasi penting tidak terbaca jelas (bukan default untuk semua gambar).
 - **Location:** GPS + OpenStreetMap ecosystem (gratis, tanpa billing):
   - `flutter_map` — render peta
   - Overpass API — pencarian toko/supermarket terdekat (POI)
@@ -130,7 +132,7 @@ Masyarakat umum, keluarga, mahasiswa, dan pekerja kantoran yang berbelanja rutin
 ## 10. Kebutuhan Non-Fungsional
 
 - **Akurasi:** target deteksi produk ≥ 85%, OCR harga ≥ 90% pada foto dengan pencahayaan cukup.
-- **Performa:** hasil scan tampil ≤ 5 detik setelah foto diambil (termasuk waktu API call ke Gemini).
+- **Performa:** hasil scan tampil ≤ 5 detik setelah foto diambil (termasuk waktu API call AI).
 - **Privasi & Legal:**
   - Aplikasi harus mencantumkan disclaimer bahwa pengambilan foto di area toko adalah tanggung jawab pengguna, mengikuti kebijakan masing-masing supermarket.
   - Data lokasi pengguna hanya disimpan sebatas store-level, tidak melacak pergerakan personal secara berkelanjutan.
@@ -150,7 +152,7 @@ Masyarakat umum, keluarga, mahasiswa, dan pekerja kantoran yang berbelanja rutin
 
 - **Mobile/Frontend Dev:** UI Flutter, UX kamera & scanning flow, state management, navigasi.
 - **Backend & Data Dev:** Supabase schema, API price history, logic validasi crowdsourcing, manajemen data produk/toko.
-- **AI/Integration Dev:** Integrasi Gemini API, logic perhitungan nilai ekonomi, integrasi OpenStreetMap (Overpass API & Nominatim).
+- **AI/Integration Dev:** Integrasi AI Vision (gpt-5.6-luna & gpt-5.6-terra), logic perhitungan nilai ekonomi, integrasi OpenStreetMap (Overpass API & Nominatim).
 
 ## 13. Di Luar Cakupan (Out of Scope) — untuk Iterasi Berikutnya
 
