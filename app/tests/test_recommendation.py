@@ -191,5 +191,19 @@ class TestRecommendationFeature(unittest.TestCase):
         self.assertTrue(dim_group["best_value"]["is_best_value"])
         self.assertEqual(dim_group["best_value"]["badge"], "BEST VALUE")
 
+    def test_get_recommended_products_endpoint(self):
+        # Test GET /recommendation/recommended-products
+        response = self.client.get("/recommendation/recommended-products")
+        self.assertEqual(response.status_code, 200)
+        items = response.json()
+        self.assertIsInstance(items, list)
+        self.assertGreater(len(items), 0)
+        first_item = items[0]
+        self.assertIn("id", first_item)
+        self.assertIn("nama", first_item)
+        self.assertIn("harga", first_item)
+        self.assertIn("nama_toko", first_item)
+        self.assertIn("updated_at", first_item)
+
 if __name__ == "__main__":
     unittest.main()

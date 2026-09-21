@@ -183,6 +183,19 @@ class PriceCompareResponse(BaseModel):
 # FEATURE 2: BEST VALUE RECOMMENDATION SCHEMAS
 # ==============================================================================
 
+class RecommendedProductItem(BaseModel):
+    id: str = Field(..., description="ID produk")
+    nama: str = Field(..., description="Nama produk")
+    kategori: str = Field(..., description="Kategori produk")
+    harga: float = Field(..., description="Harga produk dalam Rupiah")
+    ukuran: Optional[float] = Field(None, description="Ukuran/volume/berat produk")
+    satuan: Optional[str] = Field(None, description="Satuan ukuran produk")
+    nama_toko: str = Field(..., description="Nama toko terdekat tempat harga dicatat")
+    jarak_km: Optional[float] = Field(None, description="Jarak toko dari lokasi pengguna dalam km")
+    updated_at: str = Field(..., description="Waktu update harga (relatif atau ISO)")
+    foto_url: Optional[str] = Field(None, description="URL foto produk")
+
+
 class RecommendationCandidate(BaseModel):
     product_id: Optional[Union[int, str, UUID]] = Field(None, description="ID kandidat produk atau ID sementara")
     nama_produk: Optional[str] = Field(None, description="Nama kandidat produk")
