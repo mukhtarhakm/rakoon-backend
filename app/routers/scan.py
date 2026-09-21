@@ -115,10 +115,7 @@ def extract_and_parse_json(text: str) -> dict:
 async def scan_shelf_photo(file: UploadFile = File(...)):
     """
     Menerima file foto rak (multipart/form-data) dan memprosesnya melalui
-    Two-Pass AI Vision Pipeline:
-    - First-Pass: gpt-5.6-luna (model utama untuk volume tinggi dan efisiensi biaya).
-    - Verification: gpt-5.6-terra (hanya dipanggil jika ada indikasi ketidakpastian
-      atau informasi krusial seperti harga/nama tidak terbaca dengan jelas).
+    AI Vision Pipeline menggunakan model gpt-5.6-luna (OpenAI).
     """
     # 1. Validasi file upload
     if not file.filename:
@@ -164,7 +161,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
         else:
             content_type = "image/jpeg"
 
-    # 4. Memproses gambar melalui vision service (First-pass Luna + Verifikasi Terra jika perlu)
+    # 4. Memproses gambar melalui vision service (gpt-5.6-luna)
     return await process_shelf_image(contents, content_type)
 
 

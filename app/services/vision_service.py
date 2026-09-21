@@ -14,11 +14,9 @@ from app.models.schemas import (
 
 logger = logging.getLogger("rakoon_backend.vision")
 
-# Model definitions & pricing context:
-# - Primary: gpt-5.6-luna ($0.20/1M input, $1.20/1M output) - First-pass for all images
-# - Verification: gpt-5.6-terra ($2.00/1M input, $12.00/1M output) - High reasoning verification
+# Model definitions:
+# - Primary: gpt-5.6-luna ($0.20/1M input, $1.20/1M output)
 DEFAULT_PRIMARY_MODEL = "gpt-5.6-luna"
-DEFAULT_VERIFICATION_MODEL = "gpt-5.6-terra"
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 
 LUNA_SYSTEM_PROMPT = (
@@ -54,20 +52,13 @@ LUNA_USER_PROMPT = (
     "Jika sama sekali tidak ada produk yang terdeteksi di foto, kembalikan 'detected' sebagai array kosong []."
 )
 
-TERRA_SYSTEM_PROMPT = (
-    "You are an expert high-reasoning computer vision and retail verification AI. "
-    "Your task is to carefully analyze shelf images, inspect labels, shelf price tags, barcodes, and product text "
-    "to resolve ambiguities, verify numbers, clarify unreadable or uncertain data, and correct mistakes. "
-    "Output strictly valid JSON matching the requested schema without markdown blocks or conversational preamble."
-)
 
-
-def get_api_credentials() -> Tuple[str, str, str, str, str]:
+def get_api_credentials() -> Tuple[str, str, str, str]:
     """
-    Mengambil konfigurasi provider, API key, base URL, serta model utama dan verifikasi.
+    Mengambil konfigurasi provider, API key, base URL, serta model utama (gpt-5.6-luna).
     Provider yang didukung:
     - 'groq' : Fallback gratis sementara (menggunakan model Qwen/Llama di Groq LPU)
-    - 'openai': Model utama gpt-5.6-luna dan verifikasi gpt-5.6-terra
+    - 'openai': Model utama gpt-5.6-luna
     """
     provider = os.getenv("AI_VISION_PROVIDER", "").strip().lower()
 
@@ -75,15 +66,14 @@ def get_api_credentials() -> Tuple[str, str, str, str, str]:
         api_key = (os.getenv("GROQ_API_KEY") or "").strip()
         base_url = (os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
         model = os.getenv("GROQ_MODEL") or "qwen/qwen3.8-27b"
-        return "groq", api_key, base_url, model, model
+        return "groq", api_key, base_url, model
 
     # Default provider: openai
     api_key = (os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY") or "").strip()
     base_url = (os.getenv("OPENAI_BASE_URL") or os.getenv("AI_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
     primary_model = os.getenv("PRIMARY_VISION_MODEL") or os.getenv("OPENAI_MODEL_PRIMARY") or DEFAULT_PRIMARY_MODEL
-    verification_model = os.getenv("VERIFICATION_VISION_MODEL") or os.getenv("OPENAI_MODEL_VERIFICATION") or DEFAULT_VERIFICATION_MODEL
 
-    return "openai", api_key, base_url, primary_model, verification_model
+    return "openai", api_key, base_url, primary_model
 
 
 def clean_numeric(val: Any) -> Optional[float]:
@@ -215,19 +205,13 @@ def parse_raw_items(raw_items: Any) -> List[ScanResultItem]:
 
 def check_needs_escalation(items: List[ScanResultItem]) -> Tuple[bool, str]:
     """
-    Evaluasi hasil deteksi dari First-Pass (gpt-5.6-luna).
+    Evaluasi kelengkapan hasil deteksi dari model gpt-5.6-luna.
     Kembalikan (True, alasan) jika ada indikasi ketidakpastian atau informasi penting
-    yang tidak terbaca dengan jelas sehingga perlu diverifikasi oleh gpt-5.6-terra.
+    yang tidak terbaca dengan jelas sehingga perlu verifikasi manual oleh user.
     Jika hasil Luna jelas, lengkap, dan yakin, kembalikan (False, "").
-
-    Aturan:
-    - Luna digunakan sebagai first-pass untuk semua gambar (cost-sensitive $0.20/$1.20 per 1M).
-    - Terra ($2.00/$12.00 per 1M) HANYA dipanggil ketika ada indikasi ketidakpastian
-      atau informasi penting tidak terbaca jelas.
-    - Jangan menggunakan Terra untuk semua gambar secara default!
     """
     if not items:
-        return True, "Tidak ada produk yang terdeteksi pada first-pass"
+        return True, "Tidak ada produk yang terdeteksi pada hasil scan"
 
     for idx, item in enumerate(items):
         item_label = item.nama_produk or f"Produk #{idx + 1}"
@@ -249,33 +233,6 @@ def check_needs_escalation(items: List[ScanResultItem]) -> Tuple[bool, str]:
             return True, f"Item '{item_label}' memiliki atribut yang perlu verifikasi lanjutan"
 
     return False, ""
-
-
-def build_terra_verification_prompt(luna_items: List[ScanResultItem], escalation_reason: str) -> str:
-    """
-    Menyusun prompt verifikasi mendalam untuk gpt-5.6-terra dengan menyertakan
-    konteks hasil deteksi awal dari Luna dan alasan eskalasi.
-    """
-    preliminary_data = [item.model_dump() for item in luna_items]
-    preliminary_json = json.dumps(preliminary_data, ensure_ascii=False)
-
-    return (
-        "Lakukan verifikasi dan analisis visual tingkat tinggi (deep visual reasoning) terhadap foto rak supermarket ini.\n\n"
-        f"Model First-Pass (Luna) telah mendeteksi produk awal, namun memerlukan verifikasi karena: '{escalation_reason}'.\n"
-        f"Hasil deteksi awal First-Pass:\n{preliminary_json}\n\n"
-        "Petunjuk Verifikasi Khusus untuk Anda (gpt-5.6-terra):\n"
-        "1. Periksa dengan teliti setiap produk dan label harga (price tag) yang bersesuaian di rak.\n"
-        "2. Perjelas dan lengkapi nama produk yang belum terbaca atau terpotong, termasuk merek dan varian rasa/tipe.\n"
-        "3. Verifikasi angka harga dari label rak di bawah/dekat produk. Pastikan harga berupa nominal angka murni.\n"
-        "4. Lengkapi ukuran dan satuan (contoh: 250 ml, 100 g, 1 pcs) jika terlihat pada kemasan atau label rak.\n"
-        "5. Tentukan kategori yang tepat dari daftar resmi:\n"
-        "   [Makanan Pokok, Makanan Instan, Camilan, Minuman, Susu & Olahan, Bumbu & Saus, Perawatan Diri, Produk Rumah Tangga, Kesehatan, Bayi, Lainnya]\n"
-        "6. Set confidence 'tinggi' jika setelah reasoning mendalam Anda yakin dengan datanya, atau 'rendah' jika label harga benar-benar terpotong/buram total.\n"
-        "7. Hapus item false positive yang tidak relevan jika ada.\n\n"
-        "Kembalikan data terverifikasi dalam format JSON:\n"
-        "{\"detected\": [{\"nama_produk\": \"...\", \"harga\": 15000, \"ukuran\": 250, \"satuan\": \"ml\", \"kategori\": \"Minuman\", \"confidence\": \"tinggi\"}]}\n"
-        "Jika tidak ada produk yang valid sama sekali di rak, kembalikan 'detected' sebagai array kosong []."
-    )
 
 
 async def send_vision_request(
@@ -406,10 +363,10 @@ async def process_shelf_image(
     """
     Pipeline AI Vision:
     - Mode 'groq': Fallback gratis sementara menggunakan Groq LPU (qwen/qwen3.8-27b).
-    - Mode 'openai': Two-Pass Pipeline (gpt-5.6-luna + verifikasi gpt-5.6-terra).
-      Jika kredit OpenAI $0 / habis, otomatis fallback ke Groq agar pemindaian tetap berhasil.
+    - Mode 'openai': Single-Pass inferensi cepat menggunakan model gpt-5.6-luna.
+      Jika kredit OpenAI habis, otomatis fallback ke Groq agar pemindaian tetap berhasil.
     """
-    provider, api_key, base_url, primary_model, verification_model = get_api_credentials()
+    provider, api_key, base_url, primary_model = get_api_credentials()
     if not api_key or api_key.startswith("your_"):
         logger.error("Vision API Key is not properly configured.")
         return ScanResponse(
@@ -439,9 +396,9 @@ async def process_shelf_image(
             return await _process_groq_fallback(client, api_key, base64_image, content_type)
 
         # ---------------------------------------------------------
-        # PASS 1: First-Pass menggunakan gpt-5.6-luna (Semua Gambar)
+        # Inferensi langsung menggunakan gpt-5.6-luna
         # ---------------------------------------------------------
-        logger.info(f"[First-Pass] Processing image with primary model '{primary_model}'...")
+        logger.info(f"[Luna Vision] Processing image with model '{primary_model}'...")
         try:
             luna_data = await send_vision_request(
                 client=client,
@@ -467,104 +424,36 @@ async def process_shelf_image(
                 return await _process_groq_fallback(client, groq_key, base64_image, content_type)
 
             if "saldo kredit" in err_str.lower() or "credit balance exhausted" in err_str.lower() or "unauthorized" in err_str.lower():
-                logger.error(f"[First-Pass] Critical OpenAI error: {err_str}")
+                logger.error(f"[Luna Vision] Critical OpenAI error: {err_str}")
                 return ScanResponse(
                     detected=[],
                     model_used=primary_model,
                     escalated_to_verification=False,
                     message=err_str
                 )
-            logger.warning(f"[First-Pass] Luna call failed or gave unparseable output: {err_str}. Escalating to Terra.")
-            luna_items = []
-
-        # ---------------------------------------------------------
-        # EVALUASI: Apakah memerlukan eskalasi ke gpt-5.6-terra?
-        # ---------------------------------------------------------
-        needs_escalation, reason = check_needs_escalation(luna_items)
-
-        if not needs_escalation:
-            # Luna berhasil dengan sangat yakin dan lengkap: TIDAK PERLU Terra
-            logger.info(
-                f"[First-Pass SUCCESS] Model '{primary_model}' resolved {len(luna_items)} items with high confidence. "
-                f"Skipping verification model '{verification_model}' to optimize cost."
-            )
+            logger.error(f"[Luna Vision] Luna call failed: {err_str}")
             return ScanResponse(
-                detected=luna_items,
+                detected=[],
                 model_used=primary_model,
                 escalated_to_verification=False,
-                message=None
+                message=f"Gagal memproses gambar: {err_str}"
             )
 
-        # ---------------------------------------------------------
-        # PASS 2: Verifikasi menggunakan gpt-5.6-terra (Hanya saat Ragu)
-        # ---------------------------------------------------------
-        logger.info(
-            f"[Verification ESCALATION] Escalating to '{verification_model}'. Reason: {reason}. "
-            f"Using high reasoning capability to resolve uncertainties."
-        )
-
-        terra_prompt = build_terra_verification_prompt(luna_items, reason)
-
-        try:
-            terra_data = await send_vision_request(
-                client=client,
-                base_url=base_url,
-                api_key=api_key,
-                model=verification_model,
-                system_prompt=TERRA_SYSTEM_PROMPT,
-                user_prompt=terra_prompt,
-                base64_image=base64_image,
-                content_type=content_type,
-                timeout=45.0
-            )
-            choices = terra_data.get("choices", [])
-            terra_content = choices[0]["message"]["content"] if choices else ""
-            parsed_terra = extract_and_parse_json(terra_content)
-            raw_terra_items = parsed_terra.get("detected") if isinstance(parsed_terra, dict) else parsed_terra
-            terra_items = parse_raw_items(raw_terra_items)
-
-            logger.info(
-                f"[Verification SUCCESS] Model '{verification_model}' finished verification: "
-                f"{len(terra_items)} items verified."
-            )
-
-            if not terra_items and not luna_items:
-                return ScanResponse(
-                    detected=[],
-                    model_used=verification_model,
-                    escalated_to_verification=True,
-                    message="Tidak ada produk terdeteksi di rak, coba foto ulang dengan pencahayaan lebih jelas."
-                )
-
+        if not luna_items:
             return ScanResponse(
-                detected=terra_items if terra_items else luna_items,
-                model_used=verification_model if terra_items else primary_model,
-                escalated_to_verification=True,
-                message=None
-            )
-
-        except Exception as terra_err:
-            err_str = str(terra_err)
-            logger.error(
-                f"[Verification WARNING] Terra verification request failed: {err_str}."
-            )
-            if not luna_items:
-                return ScanResponse(
-                    detected=[],
-                    model_used=verification_model,
-                    escalated_to_verification=True,
-                    message=f"Gagal memproses gambar: {err_str}"
-                )
-            # Fallback halus ke hasil Luna jika pemanggilan Terra gagal tapi Luna memiliki data
-            for item in luna_items:
-                item.needs_verification = True
-
-            return ScanResponse(
-                detected=luna_items,
+                detected=[],
                 model_used=primary_model,
-                escalated_to_verification=True,
-                message="Verifikasi sekunder terhambat, menampilkan hasil estimasi awal (perlu verifikasi manual)."
+                escalated_to_verification=False,
+                message="Tidak ada produk terdeteksi di rak, coba foto ulang dengan pencahayaan lebih jelas."
             )
+
+        logger.info(f"[Luna Vision SUCCESS] Model '{primary_model}' resolved {len(luna_items)} items.")
+        return ScanResponse(
+            detected=luna_items,
+            model_used=primary_model,
+            escalated_to_verification=False,
+            message=None
+        )
 
     finally:
         if close_client:

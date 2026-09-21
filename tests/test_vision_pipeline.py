@@ -14,7 +14,6 @@ from app.services.vision_service import (
     normalize_and_validate_category,
     extract_and_parse_json,
     DEFAULT_PRIMARY_MODEL,
-    DEFAULT_VERIFICATION_MODEL,
 )
 
 
@@ -46,10 +45,10 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
             request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
         )
 
-    async def test_first_pass_luna_high_confidence_skips_terra(self):
+    async def test_luna_direct_inference_success(self):
         """
-        Jika model first-pass (gpt-5.6-luna) menghasilkan deteksi lengkap dengan confidence tinggi,
-        model verifikasi (gpt-5.6-terra) TIDAK BOLEH dipanggil untuk menghemat biaya (90%+ cost saving).
+        Model gpt-5.6-luna digunakan langsung untuk memproses gambar rak,
+        hanya melakukan 1 kali pemanggilan API (tanpa model Terra).
         """
         luna_items = [
             {
@@ -76,8 +75,7 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {
             "AI_VISION_PROVIDER": "openai",
             "OPENAI_API_KEY": "sk-test-key",
-            "PRIMARY_VISION_MODEL": "gpt-5.6-luna",
-            "VERIFICATION_VISION_MODEL": "gpt-5.6-terra"
+            "PRIMARY_VISION_MODEL": "gpt-5.6-luna"
         }):
             response = await process_shelf_image(
                 image_bytes=self.dummy_image_bytes,
@@ -85,12 +83,12 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
                 http_client=mock_client
             )
 
-        # Hanya 1 pemanggilan API (Luna)
+        # Hanya 1 kali pemanggilan API ke model Luna
         self.assertEqual(mock_client.post.call_count, 1)
         call_args = mock_client.post.call_args[1]
         self.assertEqual(call_args["json"]["model"], "gpt-5.6-luna")
 
-        # Response harus menggunakan Luna dan tidak eskalasi ke Terra
+        # Response harus menggunakan Luna dan tidak eskalasi
         self.assertEqual(response.model_used, "gpt-5.6-luna")
         self.assertFalse(response.escalated_to_verification)
         self.assertEqual(len(response.detected), 2)
@@ -98,10 +96,10 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.detected[0].confidence, "tinggi")
         self.assertFalse(response.detected[0].needs_verification)
 
-    async def test_escalation_to_terra_on_low_confidence(self):
+    async def test_luna_handles_low_confidence_without_terra(self):
         """
-        Jika hasil Luna memiliki indikasi ketidakpastian (confidence 'rendah'),
-        sistem harus mengeskalasi ke gpt-5.6-terra untuk verifikasi penalaran tinggi.
+        Jika hasil Luna memiliki confidence 'rendah', item langsung dikembalikan
+        dengan needs_verification=True tanpa memanggil Terra.
         """
         luna_items = [
             {
@@ -110,32 +108,17 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
                 "ukuran": 85,
                 "satuan": "g",
                 "kategori": "Makanan Instan",
-                "confidence": "rendah"  # Indikasi ketidakpastian!
-            }
-        ]
-
-        terra_verified_items = [
-            {
-                "nama_produk": "Indomie Mi Goreng Spesial Plus Bawang",
-                "harga": 3600,
-                "ukuran": 85,
-                "satuan": "g",
-                "kategori": "Makanan Instan",
-                "confidence": "tinggi"  # Berhasil diverifikasi dengan confidence tinggi
+                "confidence": "rendah"
             }
         ]
 
         mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.post.side_effect = [
-            self._create_mock_response(DEFAULT_PRIMARY_MODEL, luna_items),
-            self._create_mock_response(DEFAULT_VERIFICATION_MODEL, terra_verified_items)
-        ]
+        mock_client.post.return_value = self._create_mock_response(DEFAULT_PRIMARY_MODEL, luna_items)
 
         with patch.dict("os.environ", {
             "AI_VISION_PROVIDER": "openai",
             "OPENAI_API_KEY": "sk-test-key",
-            "PRIMARY_VISION_MODEL": "gpt-5.6-luna",
-            "VERIFICATION_VISION_MODEL": "gpt-5.6-terra"
+            "PRIMARY_VISION_MODEL": "gpt-5.6-luna"
         }):
             response = await process_shelf_image(
                 image_bytes=self.dummy_image_bytes,
@@ -143,41 +126,23 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
                 http_client=mock_client
             )
 
-        # Harus ada 2 pemanggilan API: 1 Luna, 1 Terra
-        self.assertEqual(mock_client.post.call_count, 2)
-        first_call = mock_client.post.call_args_list[0][1]
-        second_call = mock_client.post.call_args_list[1][1]
-        self.assertEqual(first_call["json"]["model"], "gpt-5.6-luna")
-        self.assertEqual(second_call["json"]["model"], "gpt-5.6-terra")
-
-        # Response harus mencatat Terra sebagai model verifikasi
-        self.assertEqual(response.model_used, "gpt-5.6-terra")
-        self.assertTrue(response.escalated_to_verification)
+        # Tetap hanya 1 kali pemanggilan (tidak ada eskalasi ke Terra)
+        self.assertEqual(mock_client.post.call_count, 1)
+        self.assertEqual(response.model_used, "gpt-5.6-luna")
+        self.assertFalse(response.escalated_to_verification)
         self.assertEqual(len(response.detected), 1)
-        self.assertEqual(response.detected[0].nama_produk, "Indomie Mi Goreng Spesial Plus Bawang")
-        self.assertEqual(response.detected[0].harga, 3600)
-        self.assertEqual(response.detected[0].confidence, "tinggi")
+        self.assertEqual(response.detected[0].confidence, "rendah")
+        self.assertTrue(response.detected[0].needs_verification)
 
-    async def test_escalation_to_terra_on_missing_critical_info(self):
+    async def test_luna_handles_missing_critical_info_without_terra(self):
         """
-        Jika Luna mendeteksi item tapi harga atau nama produk null/tidak terbaca jelas,
-        sistem harus mengeskalasi ke gpt-5.6-terra.
+        Jika Luna mendeteksi item tapi harga null, item langsung dikembalikan
+        dengan needs_verification=True tanpa memanggil model sekunder.
         """
         luna_items = [
             {
                 "nama_produk": "Teh Botol Sosro",
-                "harga": None,  # Harga tidak terbaca jelas oleh Luna
-                "ukuran": 450,
-                "satuan": "ml",
-                "kategori": "Minuman",
-                "confidence": "tinggi"
-            }
-        ]
-
-        terra_verified_items = [
-            {
-                "nama_produk": "Teh Botol Sosro Kotak 450ml",
-                "harga": 6500,  # Berhasil dibaca oleh kemampuan penalaran Terra
+                "harga": None,
                 "ukuran": 450,
                 "satuan": "ml",
                 "kategori": "Minuman",
@@ -186,16 +151,12 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
         ]
 
         mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.post.side_effect = [
-            self._create_mock_response(DEFAULT_PRIMARY_MODEL, luna_items),
-            self._create_mock_response(DEFAULT_VERIFICATION_MODEL, terra_verified_items)
-        ]
+        mock_client.post.return_value = self._create_mock_response(DEFAULT_PRIMARY_MODEL, luna_items)
 
         with patch.dict("os.environ", {
             "AI_VISION_PROVIDER": "openai",
             "OPENAI_API_KEY": "sk-test-key",
-            "PRIMARY_VISION_MODEL": "gpt-5.6-luna",
-            "VERIFICATION_VISION_MODEL": "gpt-5.6-terra"
+            "PRIMARY_VISION_MODEL": "gpt-5.6-luna"
         }):
             response = await process_shelf_image(
                 image_bytes=self.dummy_image_bytes,
@@ -203,54 +164,36 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
                 http_client=mock_client
             )
 
-        self.assertEqual(mock_client.post.call_count, 2)
-        self.assertEqual(response.model_used, "gpt-5.6-terra")
-        self.assertTrue(response.escalated_to_verification)
-        self.assertEqual(response.detected[0].harga, 6500)
-
-    async def test_terra_fallback_resilience_on_failure(self):
-        """
-        Jika pemanggilan gpt-5.6-terra gagal (misal timeout atau rate limit),
-        sistem harus secara anggun (gracefully) fallback ke hasil Luna dengan penanda
-        needs_verification=True, bukan menyebabkan crash.
-        """
-        luna_items = [
-            {
-                "nama_produk": "Aqua Botol 600ml",
-                "harga": 3000,
-                "ukuran": 600,
-                "satuan": "ml",
-                "kategori": "Minuman",
-                "confidence": "rendah"  # Menuntut eskalasi
-            }
-        ]
-
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        # Luna berhasil, tapi Terra melempar exception
-        mock_client.post.side_effect = [
-            self._create_mock_response(DEFAULT_PRIMARY_MODEL, luna_items),
-            httpx.ConnectTimeout("Terra connection timed out")
-        ]
-
-        with patch.dict("os.environ", {
-            "AI_VISION_PROVIDER": "openai",
-            "OPENAI_API_KEY": "sk-test-key",
-            "PRIMARY_VISION_MODEL": "gpt-5.6-luna",
-            "VERIFICATION_VISION_MODEL": "gpt-5.6-terra"
-        }):
-            response = await process_shelf_image(
-                image_bytes=self.dummy_image_bytes,
-                content_type=self.content_type,
-                http_client=mock_client
-            )
-
-        self.assertEqual(mock_client.post.call_count, 2)
-        # Fallback ke Luna dengan flag verification
+        self.assertEqual(mock_client.post.call_count, 1)
         self.assertEqual(response.model_used, "gpt-5.6-luna")
-        self.assertTrue(response.escalated_to_verification)
-        self.assertEqual(len(response.detected), 1)
+        self.assertFalse(response.escalated_to_verification)
+        self.assertIsNone(response.detected[0].harga)
         self.assertTrue(response.detected[0].needs_verification)
-        self.assertIn("Verifikasi sekunder terhambat", response.message)
+
+    async def test_luna_failure_resilience_on_api_error(self):
+        """
+        Jika pemanggilan gpt-5.6-luna gagal (misal koneksi terputus),
+        sistem harus mengembalikan respons error dengan anggun tanpa crash.
+        """
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.side_effect = httpx.ConnectTimeout("Connection timed out")
+
+        with patch.dict("os.environ", {
+            "AI_VISION_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-test-key",
+            "PRIMARY_VISION_MODEL": "gpt-5.6-luna"
+        }):
+            response = await process_shelf_image(
+                image_bytes=self.dummy_image_bytes,
+                content_type=self.content_type,
+                http_client=mock_client
+            )
+
+        self.assertEqual(mock_client.post.call_count, 1)
+        self.assertEqual(response.model_used, "gpt-5.6-luna")
+        self.assertFalse(response.escalated_to_verification)
+        self.assertEqual(len(response.detected), 0)
+        self.assertIn("Gagal memproses gambar", response.message)
 
     async def test_groq_fallback_mode(self):
         """

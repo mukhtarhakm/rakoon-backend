@@ -70,7 +70,7 @@ class ScanResponse(BaseModel):
     detected: List[ScanResultItem] = Field(default_factory=list, description="Daftar produk yang terdeteksi")
     message: Optional[str] = Field(None, description="Pesan tambahan (misal jika tidak ada produk terdeteksi)")
     model_used: Optional[str] = Field(None, description="Model AI yang digunakan untuk ekstraksi akhir")
-    escalated_to_verification: Optional[bool] = Field(False, description="Apakah proses verifikasi model Terra dijalankan")
+    escalated_to_verification: Optional[bool] = Field(False, description="Status eskalasi verifikasi sekunder (legacy, default False)")
 
 class ConfirmItem(BaseModel):
     nama_produk: str = Field(..., description="Nama produk yang dikonfirmasi")
