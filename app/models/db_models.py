@@ -11,6 +11,7 @@ class User(Base):
     nama = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     reputasi_score = Column(Integer, default=0)
+    role = Column(String, default="user", nullable=False)
 
 class Store(Base):
     __tablename__ = "stores"
@@ -30,6 +31,7 @@ class Product(Base):
     kategori = Column(String, default="General", nullable=False)
     ukuran = Column(Float, nullable=True)
     satuan = Column(String, nullable=True)
+    foto_url = Column(String, nullable=True)
     
     # Relationship to price entries
     price_entries = relationship("PriceEntry", back_populates="product", cascade="all, delete-orphan")

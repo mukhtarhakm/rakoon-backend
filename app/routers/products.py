@@ -1,15 +1,24 @@
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field
+from pathlib import Path
+import uuid
+import os
 
 from app.database import get_db
 from app.models.db_models import Product
-from app.models.schemas import ProductCategoryType
+from app.models.schemas import ProductCategoryType, ProductPhotoUpdate
+from app.dependencies import get_current_admin_user
 
 from uuid import UUID
 
 router = APIRouter()
+
+STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
+UPLOAD_DIR = STATIC_DIR / "uploads" / "products"
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 class ProductOut(BaseModel):
     id: Union[int, str, UUID] = Field(..., description="ID unik dari produk")
@@ -17,6 +26,7 @@ class ProductOut(BaseModel):
     kategori: ProductCategoryType = Field(..., description="Kategori produk")
     ukuran: Optional[float] = Field(None, description="Ukuran/volume/berat produk")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (gr, ml, dll)")
+    foto_url: Optional[str] = Field(None, description="URL foto produk")
 
     model_config = {"from_attributes": True}
 
@@ -145,3 +155,77 @@ def get_products_catalog(
         )
 
     return catalog_items
+
+
+@router.put("/{product_id}/photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
+@router.patch("/{product_id}/photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
+def update_product_photo_url(
+    product_id: str,
+    payload: ProductPhotoUpdate,
+    db: Session = Depends(get_db),
+    admin_user: dict = Depends(get_current_admin_user)
+):
+    """
+    Mengubah atau memperbarui URL foto produk (Khusus Admin).
+    """
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Produk dengan ID '{product_id}' tidak ditemukan."
+        )
+
+    product.foto_url = payload.foto_url.strip()
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+@router.post("/{product_id}/upload-photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
+async def upload_product_photo(
+    product_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin_user: dict = Depends(get_current_admin_user)
+):
+    """
+    Mengunggah berkas gambar foto produk secara langsung (Khusus Admin).
+    Format yang didukung: JPEG, PNG, WebP. Maksimum 5 MB.
+    """
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Produk dengan ID '{product_id}' tidak ditemukan."
+        )
+
+    content_type = (file.content_type or "").lower().strip()
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Format file tidak valid. Gunakan format JPEG, PNG, atau WebP."
+        )
+
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ukuran file terlalu besar. Maksimum 5MB."
+        )
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+        ext = ".jpg" if "jpeg" in content_type else ".png"
+
+    filename = f"{uuid.uuid4().hex}{ext}"
+    file_path = UPLOAD_DIR / filename
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    product.foto_url = f"/static/uploads/products/{filename}"
+    db.commit()
+    db.refresh(product)
+    return product

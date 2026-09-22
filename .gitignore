@@ -50,3 +50,7 @@ Thumbs.db
 # Stack dumps
 *.stackdump
 
+# Uploads
+static/uploads/products/*
+!static/uploads/products/.gitkeep
+

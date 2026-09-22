@@ -308,3 +308,17 @@ class BudgetRecommendResponse(BaseModel):
     store_alternatives: Optional[List[AlternativeStoreOutput]] = Field(None, description="Toko alternatif selain rekomendasi utama")
 
 
+# ==============================================================================
+# FEATURE: ADMIN & AUTH SCHEMAS
+# ==============================================================================
+
+class ProductPhotoUpdate(BaseModel):
+    foto_url: str = Field(..., min_length=1, description="URL gambar produk")
+
+class UserProfileResponse(BaseModel):
+    user_id: str = Field(..., description="ID unik pengguna (UUID)")
+    email: Optional[str] = Field(None, description="Email pengguna")
+    nama: Optional[str] = Field(None, description="Nama pengguna")
+    role: str = Field("user", description="Peran pengguna ('admin' atau 'user')")
+
+

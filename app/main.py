@@ -17,6 +17,15 @@ app.add_middleware(
     allow_headers=["*"],  # Mengizinkan semua HTTP headers
 )
 
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+# Setup static files directory (product images, etc.)
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+UPLOAD_DIR = STATIC_DIR / "uploads" / "products"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
 # Include routers
 app.include_router(price.router, prefix="/price", tags=["price"])
 app.include_router(scan.router, prefix="/scan", tags=["scan"])
