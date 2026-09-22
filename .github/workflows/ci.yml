@@ -1,0 +1,39 @@
+name: Rakoon Backend CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  backend-test:
+    name: FastAPI & Pytest Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements-dev.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Verify Alembic Migration Graph
+        run: python -m alembic heads
+
+      - name: Run Pytest Suite
+        env:
+          DATABASE_URL: sqlite:///./test_ci.db
+          GROQ_API_KEY: ci_mock_key
+          SUPABASE_URL: https://mock.supabase.co
+          SUPABASE_SERVICE_KEY: mock.jwt.key
+        run: python -m pytest -v
