@@ -78,20 +78,41 @@ def get_products_catalog(
         query = query.filter(Product.kategori.ilike(f"%{category.strip()}%"))
 
     products = query.order_by(Product.nama.asc()).limit(limit).all()
+    if not products:
+        return []
+
+    # Batch fetch all relevant PriceEntry rows in a single query (eliminating N+1)
+    product_ids = [prod.id for prod in products]
+    price_entries = (
+        db.query(PriceEntry)
+        .filter(
+            PriceEntry.product_id.in_(product_ids),
+            PriceEntry.status_verifikasi != "rejected"
+        )
+        .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
+        .all()
+    )
+
+    pes_by_product: dict[str, list[PriceEntry]] = {}
+    needed_store_ids = set()
+    for pe in price_entries:
+        pid_str = str(pe.product_id)
+        if pid_str not in pes_by_product:
+            pes_by_product[pid_str] = []
+            needed_store_ids.add(pe.store_id)
+        pes_by_product[pid_str].append(pe)
+
+    # Batch fetch cheapest store names in a single query
+    store_names: dict[str, str] = {}
+    if needed_store_ids:
+        stores = db.query(Store).filter(Store.id.in_(needed_store_ids)).all()
+        for s in stores:
+            store_names[str(s.id)] = s.nama
 
     catalog_items: List[ProductCatalogItem] = []
 
     for prod in products:
-        pes = (
-            db.query(PriceEntry)
-            .filter(
-                PriceEntry.product_id == prod.id,
-                PriceEntry.status_verifikasi != "rejected"
-            )
-            .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
-            .all()
-        )
-
+        pes = pes_by_product.get(str(prod.id), [])
         harga_min = None
         toko_min = None
         ts_latest = None
@@ -103,9 +124,7 @@ def get_products_catalog(
             if cheapest.timestamp:
                 ts_latest = cheapest.timestamp.isoformat()
 
-            store = db.query(Store).filter(Store.id == cheapest.store_id).first()
-            if store:
-                toko_min = store.nama
+            toko_min = store_names.get(str(cheapest.store_id))
 
             for pe in pes:
                 store_ids.add(pe.store_id)

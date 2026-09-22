@@ -328,22 +328,32 @@ def get_recommended_products(
                 dist = haversine_distance(lat, lng, st.lat, st.lng)
                 store_distance_map[s_id] = dist
 
-        # 2. Query all products from DB
+        # 2. Query all products and batch-fetch all non-rejected price entries (eliminating N+1)
         products = db.query(Product).all()
         candidates = []
 
-        for prod in products:
-            # Query non-rejected price entries for this product
-            pes = (
+        if products:
+            product_ids = [prod.id for prod in products]
+            all_price_entries = (
                 db.query(PriceEntry)
                 .filter(
-                    PriceEntry.product_id == prod.id,
+                    PriceEntry.product_id.in_(product_ids),
                     PriceEntry.status_verifikasi != "rejected"
                 )
                 .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
                 .all()
             )
+            pes_by_product: Dict[str, List[PriceEntry]] = {}
+            for pe in all_price_entries:
+                pid_str = str(pe.product_id)
+                if pid_str not in pes_by_product:
+                    pes_by_product[pid_str] = []
+                pes_by_product[pid_str].append(pe)
+        else:
+            pes_by_product = {}
 
+        for prod in products:
+            pes = pes_by_product.get(str(prod.id), [])
             if not pes:
                 continue
 
