@@ -74,7 +74,7 @@ def get_candidate_stores(db: Session, lat: float, lng: float, radius_km: float) 
 
 
 @router.get("/nearby", response_model=NearbyStoresResponse, status_code=status.HTTP_200_OK)
-async def get_nearby_stores(
+def get_nearby_stores(
     lat: float = Query(..., description="Latitude koordinat pengguna"),
     lng: float = Query(..., description="Longitude koordinat pengguna"),
     radius_km: float = Query(5.0, description="Radius pencarian dalam kilometer"),

@@ -242,7 +242,7 @@ def get_price_history(
         )
 
 @router.get("/compare/{product_id}", response_model=PriceCompareResponse)
-async def get_price_comparison(
+def get_price_comparison(
     product_id: str,
     lat: float = Query(..., description="Latitude koordinat pengguna"),
     lng: float = Query(..., description="Longitude koordinat pengguna"),
@@ -273,7 +273,7 @@ async def get_price_comparison(
             )
 
         # 3. Cari toko di sekitar menggunakan logic dari GET /stores/nearby
-        stores_response = await get_nearby_stores(lat=lat, lng=lng, radius_km=radius_km, db=db)
+        stores_response = get_nearby_stores(lat=lat, lng=lng, radius_km=radius_km, db=db)
         nearby_stores = stores_response.stores
 
         # 4. Batch-fetch latest verified price entry per store (single SQL query, no N+1)
