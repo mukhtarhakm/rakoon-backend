@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -56,7 +56,7 @@ class TestPriceHistoryBackend(unittest.TestCase):
 
         self.db.add_all([product1, product2, store1, store2])
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         day1 = now - timedelta(days=5)
         day2 = now - timedelta(days=2)
         day_old = now - timedelta(days=60)

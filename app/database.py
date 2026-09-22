@@ -55,14 +55,13 @@ class MockQueryBuilder:
         return self
 
     def execute(self):
-        # Mock database actions
-        from datetime import datetime
+        from datetime import datetime, timezone
         if self.insert_data is not None:
             record = dict(self.insert_data)
             if "id" not in record:
                 record["id"] = len(self.db_store.get(self.table_name, [])) + 1
             if "timestamp" not in record:
-                record["timestamp"] = datetime.utcnow().isoformat()
+                record["timestamp"] = datetime.now(timezone.utc).isoformat()
             if "status_verifikasi" not in record:
                 record["status_verifikasi"] = "pending"
             

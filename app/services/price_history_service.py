@@ -8,7 +8,7 @@ terhadap data yang sudah diinsert oleh endpoint F1 (scan/confirm).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import List, Optional
 
@@ -44,7 +44,7 @@ def _resolve_date_window(
         return start_date, end_date
 
     if range_enum and range_enum != DateRange.ALL:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         delta_map: dict[DateRange, timedelta] = {
             DateRange.ONE_MONTH: timedelta(days=30),
             DateRange.THREE_MONTHS: timedelta(days=90),
