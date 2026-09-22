@@ -334,7 +334,13 @@ class TestVisionHelpers(unittest.TestCase):
 class TestScanEndpoint(unittest.TestCase):
 
     def setUp(self):
+        from app.routers.scan import scan_rate_limiter
+        scan_rate_limiter.requests.clear()
         self.client = TestClient(app)
+
+    def tearDown(self):
+        from app.routers.scan import scan_rate_limiter
+        scan_rate_limiter.requests.clear()
 
     def test_scan_invalid_extension(self):
         response = self.client.post(
@@ -351,6 +357,34 @@ class TestScanEndpoint(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("kosong", response.json()["detail"])
+
+    def test_scan_file_too_large(self):
+        large_bytes = b"0" * (5 * 1024 * 1024 + 1)
+        response = self.client.post(
+            "/scan/",
+            files={"file": ("large.jpg", large_bytes, "image/jpeg")}
+        )
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("terlalu besar", response.json()["detail"])
+
+    def test_scan_rate_limiting(self):
+        test_ip = "192.168.1.100"
+        headers = {"X-Forwarded-For": test_ip}
+        for _ in range(10):
+            res = self.client.post(
+                "/scan/",
+                files={"file": ("test.txt", b"invalid", "text/plain")},
+                headers=headers
+            )
+            self.assertEqual(res.status_code, 400)
+
+        response = self.client.post(
+            "/scan/",
+            files={"file": ("test.txt", b"invalid", "text/plain")},
+            headers=headers
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("Terlalu banyak permintaan scan", response.json()["detail"])
 
 
 if __name__ == "__main__":
