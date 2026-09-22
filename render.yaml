@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: rakoon-backend
+    runtime: python
+    region: singapore  # Pilih region terdekat (Asia)
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SUPABASE_URL
+        sync: false        # Akan diisi manual di Render Dashboard
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b
+    healthCheckPath: /health

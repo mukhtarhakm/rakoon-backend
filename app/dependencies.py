@@ -7,7 +7,6 @@ import httpx
 from typing import Dict, Any
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jwt.algorithms import ECAlgorithm
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -124,7 +123,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             
         # 5. Construct Elliptic Curve public key
         try:
-            public_key = ECAlgorithm.from_jwk(jwk)
+            public_key = jwt.PyJWK.from_dict(jwk).key
         except Exception:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

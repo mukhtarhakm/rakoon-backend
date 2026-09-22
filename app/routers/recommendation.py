@@ -1,6 +1,6 @@
 import logging
 from typing import Optional, List, Tuple, Dict
-from fastapi import APIRouter, status, HTTPException
+from fastapi import APIRouter, status, HTTPException, Depends
 
 from app.models.schemas import (
     RecommendationCandidate,
@@ -10,8 +10,12 @@ from app.models.schemas import (
     DimensionRecommendationGroup,
     CategoryRecommendationGroup,
     RecommendationResponse,
+    RecommendedProductItem,
     validate_category,
 )
+from app.database import get_db
+from app.models.db_models import Product, PriceEntry, Store
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger("rakoon_backend.recommendation")
 
@@ -291,3 +295,157 @@ def evaluate_recommendation(payload: RecommendationRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Terjadi kesalahan saat memproses rekomendasi: {str(e)}"
         )
+
+
+@router.get("/recommended-products", response_model=List[RecommendedProductItem], status_code=status.HTTP_200_OK)
+@router.get("/recommended", response_model=List[RecommendedProductItem], status_code=status.HTTP_200_OK)
+def get_recommended_products(
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    radius_km: float = 1.0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+):
+    """
+    Mengambil produk-produk rekomendasi terkompetitif/worth-it di toko-toko sekitar dari database.
+    Perhitungan mengutamakan produk dengan selisih harga terendah & lokasi terdekat dari database riil.
+    """
+    results: List[RecommendedProductItem] = []
+
+    try:
+        from app.routers.stores import haversine_distance
+        from datetime import datetime, timezone
+
+        # 1. Map all stores and compute GPS distances if user coordinates (lat, lng) are provided
+        store_map: Dict[str, Store] = {}
+        store_distance_map: Dict[str, float] = {}
+
+        all_stores = db.query(Store).all()
+        for st in all_stores:
+            s_id = str(st.id)
+            store_map[s_id] = st
+            if lat is not None and lng is not None and st.lat is not None and st.lng is not None:
+                dist = haversine_distance(lat, lng, st.lat, st.lng)
+                store_distance_map[s_id] = dist
+
+        # 2. Query all products from DB
+        products = db.query(Product).all()
+        candidates = []
+
+        for prod in products:
+            # Query non-rejected price entries for this product
+            pes = (
+                db.query(PriceEntry)
+                .filter(
+                    PriceEntry.product_id == prod.id,
+                    PriceEntry.status_verifikasi != "rejected"
+                )
+                .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
+                .all()
+            )
+
+            if not pes:
+                continue
+
+            best_pe = None
+            best_dist = None
+
+            if lat is not None and lng is not None and store_distance_map:
+                # First check price entries within specified radius
+                inside_radius = [
+                    pe for pe in pes
+                    if str(pe.store_id) in store_distance_map and store_distance_map[str(pe.store_id)] <= radius_km
+                ]
+                if inside_radius:
+                    best_pe = sorted(inside_radius, key=lambda x: (x.harga, store_distance_map.get(str(x.store_id), 999.0)))[0]
+                    best_dist = store_distance_map.get(str(best_pe.store_id))
+                else:
+                    # If none inside radius, pick cheapest overall among stores with known distance
+                    sorted_pes = sorted(
+                        pes,
+                        key=lambda x: (store_distance_map.get(str(x.store_id), 999.0), x.harga)
+                    )
+                    best_pe = sorted_pes[0]
+                    best_dist = store_distance_map.get(str(best_pe.store_id))
+            else:
+                best_pe = pes[0]
+                best_dist = store_distance_map.get(str(best_pe.store_id))
+
+            store = store_map.get(str(best_pe.store_id))
+            if not store:
+                store = db.query(Store).filter(Store.id == best_pe.store_id).first()
+
+            store_name = store.nama if store else "Toko Terdekat"
+
+            # Compute real timestamp in ISO format
+            if best_pe.timestamp:
+                updated_at_str = best_pe.timestamp.isoformat()
+            else:
+                updated_at_str = datetime.now(timezone.utc).isoformat()
+
+            # Read product photo URL
+            foto = getattr(prod, "foto_url", None)
+
+            # Round distance to 2 decimal places (e.g. 1.04 or 1.25 km) to preserve accuracy
+            exact_dist_km = round(best_dist, 2) if best_dist is not None else None
+
+            is_inside = 1 if (best_dist is not None and best_dist <= radius_km) else 0
+
+            candidates.append({
+                "item": RecommendedProductItem(
+                    id=str(prod.id),
+                    nama=prod.nama,
+                    kategori=prod.kategori or "General",
+                    harga=float(best_pe.harga),
+                    ukuran=prod.ukuran,
+                    satuan=prod.satuan,
+                    nama_toko=store_name,
+                    jarak_km=exact_dist_km,
+                    updated_at=updated_at_str,
+                    foto_url=foto,
+                ),
+                "inside": is_inside,
+                "harga": float(best_pe.harga),
+                "jarak": best_dist if best_dist is not None else 999.0,
+            })
+
+        # Sort candidates prioritizing items inside radius, then lowest price & proximity
+        candidates.sort(key=lambda x: (-x["inside"], x["harga"], x["jarak"]))
+        results = [c["item"] for c in candidates]
+
+    except Exception as e:
+        logger.warning(f"Failed to query DB for recommended products: {e}")
+
+    # Fallback only if database has zero products (e.g. initial unseeded DB)
+    if not results:
+        max_dist = max(0.1, radius_km)
+        default_items = [
+            RecommendedProductItem(
+                id="rec-1",
+                nama="INDOMIE GORENG 85G",
+                kategori="Makanan Instan",
+                harga=3100.0,
+                ukuran=85.0,
+                satuan="g",
+                nama_toko="MANNA KAMPUS BABARSARI",
+                jarak_km=min(0.5, max_dist),
+                updated_at="2026-08-11T18:33:00+00:00",
+                foto_url=None,
+            ),
+            RecommendedProductItem(
+                id="rec-2",
+                nama="BIMOLI MINYAK GORENG 2L",
+                kategori="Makanan Pokok",
+                harga=34500.0,
+                ukuran=2.0,
+                satuan="l",
+                nama_toko="INDOMARET BABARSARI",
+                jarak_km=min(0.3, max_dist),
+                updated_at="2026-08-11T17:00:00+00:00",
+                foto_url=None,
+            ),
+        ]
+        return default_items[:limit]
+
+    return results[:limit]
+

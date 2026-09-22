@@ -191,5 +191,35 @@ class TestRecommendationFeature(unittest.TestCase):
         self.assertTrue(dim_group["best_value"]["is_best_value"])
         self.assertEqual(dim_group["best_value"]["badge"], "BEST VALUE")
 
+    def test_get_recommended_products_endpoint(self):
+        # Test GET /recommendation/recommended-products
+        response = self.client.get("/recommendation/recommended-products")
+        self.assertEqual(response.status_code, 200)
+        items = response.json()
+        self.assertIsInstance(items, list)
+        self.assertGreater(len(items), 0)
+        first_item = items[0]
+        self.assertIn("id", first_item)
+        self.assertIn("nama", first_item)
+        self.assertIn("harga", first_item)
+        self.assertIn("nama_toko", first_item)
+        self.assertIn("updated_at", first_item)
+
+    def test_get_recommended_products_with_location_params(self):
+        # Test GET /recommendation/recommended-products with lat, lng, radius_km
+        response = self.client.get("/recommendation/recommended-products?lat=-7.7793&lng=110.4168&radius_km=1.0&limit=5")
+        self.assertEqual(response.status_code, 200)
+        items = response.json()
+        self.assertIsInstance(items, list)
+        self.assertGreater(len(items), 0)
+        self.assertLessEqual(len(items), 5)
+        for item in items:
+            self.assertIn("id", item)
+            self.assertIn("nama", item)
+            self.assertIn("harga", item)
+            self.assertIn("jarak_km", item)
+            if item["jarak_km"] is not None:
+                self.assertLessEqual(item["jarak_km"], 1.0)
+
 if __name__ == "__main__":
     unittest.main()

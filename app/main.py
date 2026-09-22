@@ -26,14 +26,16 @@ app.include_router(recommendation.router, prefix="/recommendation", tags=["recom
 app.include_router(budget_shopping.router, prefix="/budget-shopping", tags=["budget-shopping"])
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 
-@app.get("/")
-@app.get("/health")
-def health_check():
+async def health_check():
     """
     Health check endpoint untuk memastikan server berjalan dengan baik.
+    Mendukung GET dan HEAD (untuk monitoring tools).
     """
     return {
         "status": "ok",
         "app": "Rakoon Backend",
         "version": "1.0.0"
     }
+
+app.add_api_route("/", health_check, methods=["GET", "HEAD"])
+app.add_api_route("/health", health_check, methods=["GET", "HEAD"])
