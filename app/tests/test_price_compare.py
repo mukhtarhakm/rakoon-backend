@@ -6,7 +6,7 @@ unavailable-price store behavior, and existing price ranking semantics.
 import os
 import sys
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -63,7 +63,7 @@ def _make_price(db, product_id, store_id, harga: int, status: str = "verified",
         store_id=store_id,
         harga=harga,
         sumber_user_id="00000000-0000-0000-0000-000000000001",
-        timestamp=dt or datetime.utcnow(),
+        timestamp=dt or datetime.now(timezone.utc),
         status_verifikasi=status,
     )
     db.add(entry)
