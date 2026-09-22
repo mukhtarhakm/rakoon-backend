@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid, Index
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -48,14 +48,19 @@ class ScanSession(Base):
 
 class PriceEntry(Base):
     __tablename__ = "price_entries"
+    __table_args__ = (
+        Index("ix_price_entries_product_status", "product_id", "status_verifikasi"),
+        Index("ix_price_entries_store_product", "store_id", "product_id"),
+        Index("ix_price_entries_timestamp", "timestamp"),
+    )
     
     id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
-    product_id = Column(Uuid(as_uuid=False), ForeignKey("products.id"), nullable=False)
-    store_id = Column(Uuid(as_uuid=False), nullable=False)
+    product_id = Column(Uuid(as_uuid=False), ForeignKey("products.id"), nullable=False, index=True)
+    store_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
     harga = Column(Integer, nullable=False)
     sumber_user_id = Column(Uuid(as_uuid=False), nullable=False)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-    status_verifikasi = Column(String, default="pending", nullable=False)
+    status_verifikasi = Column(String, default="pending", nullable=False, index=True)
     scan_session_id = Column(Uuid(as_uuid=False), ForeignKey("scan_sessions.id"), nullable=True, index=True)
     
     # Relationships
