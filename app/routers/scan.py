@@ -26,6 +26,7 @@ from app.models.schemas import (
 from app.models.db_models import Product, PriceEntry, Store, ScanSession
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.services.vision_service import process_shelf_image
 
 
 logger = logging.getLogger("rakoon_backend.scan")
@@ -113,20 +114,10 @@ def extract_and_parse_json(text: str) -> dict:
 @router.post("/", response_model=ScanResponse, status_code=status.HTTP_200_OK)
 async def scan_shelf_photo(file: UploadFile = File(...)):
     """
-    Menerima file foto (multipart/form-data) dan mengirimkannya ke Groq API 
-    untuk mendeteksi produk yang ada di rak menggunakan model vision Llama, 
-    termasuk nama, harga, ukuran, satuan, dan confidence level.
+    Menerima file foto rak (multipart/form-data) dan memprosesnya melalui
+    AI Vision Pipeline menggunakan model gpt-5.6-luna (OpenAI).
     """
-    # 1. Pastikan API key sudah dikonfigurasi
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key or api_key == "your_groq_api_key_here":
-        logger.error("GROQ_API_KEY is not configured in .env file.")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Groq API Key belum dikonfigurasi. Silakan tambahkan GROQ_API_KEY ke file .env Anda."
-        )
-
-    # 2. Validasi file upload
+    # 1. Validasi file upload
     if not file.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -140,7 +131,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
             detail="File yang diunggah bukan gambar yang didukung (gunakan JPG, JPEG, PNG, atau WEBP)."
         )
 
-    # Membaca konten file
+    # 2. Membaca konten file foto
     try:
         contents = await file.read()
         if not contents:
@@ -158,7 +149,7 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
             detail=f"Gagal membaca file foto: {str(e)}"
         )
 
-    # Menentukan MIME type
+    # 3. Menentukan MIME type
     content_type = file.content_type
     if not content_type or not content_type.startswith("image/"):
         if ext in ('.jpg', '.jpeg'):
@@ -170,189 +161,8 @@ async def scan_shelf_photo(file: UploadFile = File(...)):
         else:
             content_type = "image/jpeg"
 
-    # 3. Encode image ke Base64
-    try:
-        logger.info("Encoding image to Base64...")
-        base64_image = base64.b64encode(contents).decode("utf-8")
-    except Exception as e:
-        logger.error(f"Error encoding image to base64: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Gagal memproses gambar untuk dikirim ke AI."
-        )
-
-    # 4. Kirim request ke Groq API (OpenAI Compatible Endpoint)
-    groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": groq_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant that only outputs valid JSON. Do not include any explanation, conversational text, or markdown code blocks (like ```json). Output must be strictly valid JSON matching the requested schema."
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Identifikasi produk-produk di rak supermarket yang ada pada foto ini. "
-                            "Temukan produk sebanyak-banyaknya yang terdeteksi dengan jelas. "
-                            "Untuk setiap produk, kembalikan data berikut:\n"
-                            "- nama_produk: nama produk (string, null jika tidak terbaca)\n"
-                            "- harga: harga produk (angka/number, null jika tidak terbaca)\n"
-                            "- ukuran: ukuran/volume/berat produk (angka/number, null jika tidak terbaca)\n"
-                            "- satuan: satuan ukuran seperti ml, gr, kg, pcs, dll. (string, null jika tidak terbaca)\n"
-                            "- kategori: kategori produk yang HARUS dipilih dari daftar authoritative berikut:\n"
-                            "  * Makanan Pokok\n"
-                            "  * Makanan Instan\n"
-                            "  * Camilan\n"
-                            "  * Minuman\n"
-                            "  * Susu & Olahan\n"
-                            "  * Bumbu & Saus\n"
-                            "  * Perawatan Diri\n"
-                            "  * Produk Rumah Tangga\n"
-                            "  * Kesehatan\n"
-                            "  * Bayi\n"
-                            "  * Lainnya\n"
-                            "  AI TIDAK BOLEH membuat kategori baru di luar daftar di atas. Jika tidak yakin atau tidak ada yang cocok, gunakan 'Lainnya'.\n"
-                            "- confidence: 'tinggi' jika Anda sangat yakin dengan informasinya, 'rendah' jika ragu-ragu (string)\n\n"
-                            "Kembalikan hasilnya dalam format JSON dengan kunci utama bernama 'detected'. "
-                            "Contoh output: {\"detected\": [{\"nama_produk\": \"Indomie Mi Goreng\", \"harga\": 3500, \"ukuran\": 85, \"satuan\": \"g\", \"kategori\": \"Makanan Instan\", \"confidence\": \"tinggi\"}]}. "
-                            "Jika sama sekali tidak ada produk yang terdeteksi di foto, kembalikan 'detected' sebagai array kosong."
-                        )
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{content_type};base64,{base64_image}"
-                        }
-                    }
-                ]
-            }
-        ]
-    }
-
-    # Disable thinking tokens for Qwen models to ensure fast response, low token usage, and avoid JSON format errors or timeouts
-    if "qwen" in groq_model.lower():
-        payload["reasoning_effort"] = "none"
-
-
-    try:
-        logger.info(f"Sending request to Groq API using model '{groq_model}'...")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            
-        logger.info(f"Groq API responded with status code {response.status_code}")
-            
-        if response.status_code != 200:
-            logger.error(f"Groq API returned error {response.status_code}: {response.text}")
-            return ScanResponse(
-                detected=[],
-                message=f"Groq API Error ({response.status_code}): Gagal memproses gambar."
-            )
-            
-        groq_data = response.json()
-    except httpx.RequestError as e:
-        logger.error(f"HTTP request to Groq API failed: {str(e)}")
-        return ScanResponse(
-            detected=[],
-            message="Gagal menghubungi server AI (Connection Timeout/Error)."
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error when calling Groq API: {str(e)}")
-        return ScanResponse(
-            detected=[],
-            message=f"Terjadi kesalahan saat memproses gambar: {str(e)}"
-        )
-
-    # 5. Parsing & Validasi Response Groq
-    try:
-        choices = groq_data.get("choices", [])
-        if not choices:
-            logger.warning(f"No choices returned from Groq API: {groq_data}")
-            return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
-            
-        text_content = choices[0].get("message", {}).get("content", "")
-        if not text_content:
-            logger.warning(f"Empty content in Groq response: {groq_data}")
-            return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
-            
-        parsed_json = extract_and_parse_json(text_content)
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        logger.error(f"Failed to parse Groq JSON content: {str(e)}")
-        return ScanResponse(
-            detected=[],
-            message="Format data dari AI tidak valid. Pastikan foto cukup jelas dan coba lagi."
-        )
-
-    # Ambil daftar item yang terdeteksi
-    detected_items = parsed_json.get("detected")
-    if not isinstance(detected_items, list):
-        if isinstance(parsed_json, list):
-            detected_items = parsed_json
-        else:
-            detected_items = []
-            
-    logger.info(f"Parsed AI response successfully. Detected {len(detected_items)} items on shelf.")
-
-    if not detected_items:
-        return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
-
-    # 6. Pembersihan data & penentuan `needs_verification`
-    processed_items: List[ScanResultItem] = []
-    for item in detected_items:
-        if not isinstance(item, dict):
-            continue
-            
-        nama_produk = clean_str(item.get("nama_produk"))
-        harga = clean_numeric(item.get("harga"))
-        ukuran = clean_numeric(item.get("ukuran"))
-        satuan = clean_str(item.get("satuan"))
-        kategori_raw = item.get("kategori")
-        kategori_val = normalize_and_validate_category(kategori_raw)
-        
-        # Normalkan confidence
-        confidence_val = item.get("confidence")
-        if isinstance(confidence_val, str):
-            confidence_val = confidence_val.strip().lower()
-            if confidence_val not in ("tinggi", "rendah"):
-                confidence_val = "rendah"
-        else:
-            confidence_val = "rendah"
-
-        # Item butuh verifikasi jika confidence rendah atau ada field penting yang null
-        is_any_field_null = (
-            nama_produk is None or
-            harga is None or
-            ukuran is None or
-            satuan is None
-        )
-        needs_verification = (confidence_val == "rendah") or is_any_field_null
-
-        processed_items.append(
-            ScanResultItem(
-                nama_produk=nama_produk,
-                harga=harga,
-                ukuran=ukuran,
-                satuan=satuan,
-                kategori=kategori_val,
-                confidence=confidence_val,
-                needs_verification=needs_verification
-            )
-        )
-
-    if not processed_items:
-        return ScanResponse(detected=[], message="Tidak ada produk terdeteksi, coba foto ulang")
-
-    return ScanResponse(detected=processed_items)
+    # 4. Memproses gambar melalui vision service (gpt-5.6-luna)
+    return await process_shelf_image(contents, content_type)
 
 
 @router.post("/confirm", response_model=ConfirmResponse, status_code=status.HTTP_201_CREATED)
