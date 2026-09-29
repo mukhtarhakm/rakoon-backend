@@ -18,4 +18,6 @@ services:
         sync: false
       - key: GROQ_MODEL
         value: qwen/qwen3.8-27b
+      - key: ADMIN_EMAILS
+        sync: false        # Diisi manual di Render Dashboard
     healthCheckPath: /health
