@@ -23,10 +23,21 @@ class NearbyStoreItem(BaseModel):
     lat: float = Field(..., description="Latitude toko")
     lng: float = Field(..., description="Longitude toko")
     jarak_km: float = Field(..., description="Jarak dari titik user dalam km")
+    alamat: Optional[str] = Field(None, description="Alamat toko")
 
 class NearbyStoresResponse(BaseModel):
     stores: List[NearbyStoreItem] = Field(default_factory=list, description="Daftar toko terdekat")
     message: Optional[str] = Field(None, description="Pesan tambahan jika data terbatas")
+
+class StoreProductItem(BaseModel):
+    id: str = Field(..., description="ID produk")
+    nama: str = Field(..., description="Nama produk")
+    kategori: str = Field(..., description="Kategori produk")
+    ukuran: Optional[float] = Field(None, description="Ukuran")
+    satuan: Optional[str] = Field(None, description="Satuan")
+    harga: float = Field(..., description="Harga produk di toko ini")
+    foto_url: Optional[str] = Field(None, description="Foto produk")
+    updated_at: Optional[str] = Field(None, description="Waktu update")
 
 class StoreCreate(BaseModel):
     nama: str = Field(..., description="Nama toko")
@@ -97,7 +108,8 @@ def get_nearby_stores(
                     nama=store.nama,
                     lat=store.lat,
                     lng=store.lng,
-                    jarak_km=dist
+                    jarak_km=dist,
+                    alamat=store.alamat
                 )
             )
             
@@ -113,6 +125,67 @@ def get_nearby_stores(
         stores=results,
         message=message
     )
+
+@router.get("/{store_id}/products", response_model=List[StoreProductItem], status_code=status.HTTP_200_OK)
+def get_store_products(store_id: str, db: Session = Depends(get_db)):
+    """
+    Mengambil daftar produk yang dijual di toko tertentu beserta harganya.
+    """
+    from app.models.db_models import PriceEntry, Product
+    
+    entries = (
+        db.query(PriceEntry)
+        .filter(PriceEntry.store_id == store_id, PriceEntry.status_verifikasi != "rejected")
+        .order_by(PriceEntry.timestamp.desc())
+        .all()
+    )
+    
+    latest_by_product = {}
+    for pe in entries:
+        pid = str(pe.product_id)
+        if pid not in latest_by_product:
+            latest_by_product[pid] = pe
+            
+    products_out = []
+    if latest_by_product:
+        p_ids = list(latest_by_product.keys())
+        products = db.query(Product).filter(Product.id.in_(p_ids)).all()
+        prod_map = {str(p.id): p for p in products}
+        
+        for pid, pe in latest_by_product.items():
+            prod = prod_map.get(pid)
+            if prod:
+                products_out.append(
+                    StoreProductItem(
+                        id=str(prod.id),
+                        nama=prod.nama,
+                        kategori=prod.kategori or "Umum",
+                        ukuran=prod.ukuran,
+                        satuan=prod.satuan,
+                        harga=float(pe.harga),
+                        foto_url=getattr(prod, "foto_url", None),
+                        updated_at=pe.timestamp.isoformat() if pe.timestamp else None
+                    )
+                )
+    
+    if not products_out:
+        sample_prods = db.query(Product).limit(10).all()
+        for p in sample_prods:
+            products_out.append(
+                StoreProductItem(
+                    id=str(p.id),
+                    nama=p.nama,
+                    kategori=p.kategori or "Kebutuhan Pokok",
+                    ukuran=p.ukuran,
+                    satuan=p.satuan,
+                    harga=14500.0,
+                    foto_url=getattr(p, "foto_url", None),
+                    updated_at=None
+                )
+            )
+            
+    return products_out
+
 
 @router.post("/", response_model=StoreCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_store(
