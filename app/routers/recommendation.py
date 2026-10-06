@@ -72,13 +72,16 @@ def normalize_unit_and_dimension(satuan: Optional[str], ukuran: float) -> Option
 
 def format_unit_price(harga_per_unit: float, base_unit: str) -> str:
     """
-    Format harga per unit menjadi teks Rupiah yang rapi.
-    Contoh: Rp60.00 / ml atau Rp150.50 / g
+    Format harga per unit menjadi teks Rupiah yang rapi (pemisah ribuan titik, desimal koma).
+    Contoh: Rp60,00 / ml atau Rp1.234,50 / g
     """
-    if harga_per_unit >= 10:
-        return f"Rp{harga_per_unit:,.2f} / {base_unit}".replace(",", ".")
-    else:
-        return f"Rp{harga_per_unit:.2f} / {base_unit}".replace(".", ",")
+    int_part = int(harga_per_unit)
+    dec_part = int(round((harga_per_unit - int_part) * 100))
+    if dec_part >= 100:
+        int_part += 1
+        dec_part = 0
+    formatted_int = f"{int_part:,}".replace(",", ".")
+    return f"Rp{formatted_int},{dec_part:02d} / {base_unit}"
 
 def evaluate_best_value_logic(items: List[RecommendationCandidate]) -> RecommendationResponse:
     """

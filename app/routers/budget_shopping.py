@@ -22,8 +22,16 @@ logger = logging.getLogger("rakoon_backend.budget_shopping")
 router = APIRouter()
 
 def format_rupiah(amount: float) -> str:
-    """Helper untuk merapikan format Rupiah."""
-    return f"Rp{amount:,.2f}".replace(",", ".")
+    """Helper untuk merapikan format Rupiah (pemisah ribuan titik, desimal koma)."""
+    int_part = int(amount)
+    dec_part = int(round((amount - int_part) * 100))
+    if dec_part >= 100:
+        int_part += 1
+        dec_part = 0
+    formatted_int = f"{int_part:,}".replace(",", ".")
+    if dec_part > 0:
+        return f"Rp{formatted_int},{dec_part:02d}"
+    return f"Rp{formatted_int}"
 
 def is_valid_uuid(val: str) -> bool:
     try:
@@ -38,7 +46,7 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
     Rekomendasi belanja berdasarkan budget & daftar barang (Single-Store Full Match MVP).
     - HANYA merekomendasikan toko yang memiliki 100% seluruh barang yang diminta.
     - HANYA menggunakan PriceEntry yang terverifikasi (status_verifikasi = "verified").
-    - Memilih toko dengan total_cost TERBESAR yang masih <= budget (memaksimalkan pemanfaatan budget).
+    - Memilih toko dengan total_cost TERKECIL yang masih <= budget (meminimalkan pengeluaran biaya belanja).
     """
     try:
         user_budget = float(payload.budget)

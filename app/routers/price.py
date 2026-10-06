@@ -139,7 +139,7 @@ PRICE_HISTORY_RESPONSES = {
 
 
 @router.get(
-    "/api/v1/products/{product_id}/price-history",
+    "/products/{product_id}/price-history",
     response_model=PriceHistoryResponse,
     summary="Get Price History and Trend Data for a Product",
     description=(
@@ -153,6 +153,17 @@ PRICE_HISTORY_RESPONSES = {
     ),
     responses=PRICE_HISTORY_RESPONSES,
     tags=["Price History"],
+)
+@router.get(
+    "/api/v1/products/{product_id}/price-history",
+    response_model=PriceHistoryResponse,
+    summary="Get Price History and Trend Data for a Product (Legacy Path)",
+    description=(
+        "Endpoint kompatibilitas legacy untuk mengambil riwayat harga dan tren grafik produk."
+    ),
+    responses=PRICE_HISTORY_RESPONSES,
+    tags=["Price History"],
+    include_in_schema=False,
 )
 def get_price_history_v1(
     product_id: str,
@@ -193,7 +204,7 @@ def get_price_history_v1(
 
 
 
-@router.get("/product/{product_id}", response_model=List[PriceEntryOut])
+@router.get("/product/{product_id}", response_model=Union[List[PriceEntryOut], dict])
 def get_price_history(
     product_id: str,
     store_id: Optional[str] = Query(None, description="Filter berdasarkan ID toko (opsional)"),

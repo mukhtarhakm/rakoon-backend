@@ -127,6 +127,7 @@ def get_nearby_stores(
     )
 
 @router.get("/{store_id}/products", response_model=List[StoreProductItem], status_code=status.HTTP_200_OK)
+@router.get("/api/v1/stores/{store_id}/products", response_model=List[StoreProductItem], status_code=status.HTTP_200_OK)
 def get_store_products(store_id: str, db: Session = Depends(get_db)):
     """
     Mengambil daftar produk yang dijual di toko tertentu beserta harganya.
