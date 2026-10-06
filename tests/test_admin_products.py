@@ -170,7 +170,7 @@ class TestAdminProducts(unittest.TestCase):
         data = res.json()
         # URL now comes from Supabase Storage (https://...)
         self.assertTrue(data["foto_url"].startswith("https://"))
-        self.assertTrue(data["foto_url"].endswith(".png"))
+        self.assertTrue(data["foto_url"].rstrip("?").endswith(".png"))
 
     def test_upload_photo_invalid_type_rejected(self):
         app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID

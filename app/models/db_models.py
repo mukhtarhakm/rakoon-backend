@@ -68,3 +68,40 @@ class PriceEntry(Base):
     # Relationships
     product = relationship("Product", back_populates="price_entries")
     scan_session = relationship("ScanSession", back_populates="price_entries")
+
+
+class StoreOwner(Base):
+    __tablename__ = "store_owners"
+
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
+    store_id = Column(Uuid(as_uuid=False), ForeignKey("stores.id"), nullable=False, index=True)
+    status = Column(String, default="verified", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    store = relationship("Store")
+
+
+class AdCampaign(Base):
+    __tablename__ = "ad_campaigns"
+    __table_args__ = (
+        Index("ix_ad_campaigns_status_expires", "status", "expires_at"),
+    )
+
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    store_id = Column(Uuid(as_uuid=False), ForeignKey("stores.id"), nullable=False, index=True)
+    owner_user_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    banner_url = Column(String, nullable=False)
+    duration_days = Column(Integer, default=3, nullable=False)
+    price_paid = Column(Integer, default=15000, nullable=False)
+    status = Column(String, default="active", nullable=False, index=True)
+    payment_method = Column(String, default="QRIS", nullable=False)
+    payment_ref = Column(String, nullable=True, index=True)
+    payment_status = Column(String, default="paid", nullable=False, index=True)
+    start_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    store = relationship("Store")
+
