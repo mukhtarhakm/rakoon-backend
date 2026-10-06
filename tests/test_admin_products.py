@@ -168,13 +168,9 @@ class TestAdminProducts(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertTrue(data["foto_url"].startswith("/static/uploads/products/"))
+        # URL now comes from Supabase Storage (https://...)
+        self.assertTrue(data["foto_url"].startswith("https://"))
         self.assertTrue(data["foto_url"].endswith(".png"))
-
-        # Verify static file serves
-        static_res = self.client.get(data["foto_url"])
-        self.assertEqual(static_res.status_code, 200)
-        self.assertEqual(static_res.content, b"\x89PNG\r\n\x1a\nFake PNG file binary content")
 
     def test_upload_photo_invalid_type_rejected(self):
         app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID

@@ -6,7 +6,7 @@ from pathlib import Path
 import uuid
 import os
 
-from app.database import get_db
+from app.database import get_db, supabase
 from app.models.db_models import Product
 from app.models.schemas import ProductCategoryType, ProductPhotoUpdate
 from app.dependencies import get_current_admin_user
@@ -15,8 +15,7 @@ from uuid import UUID
 
 router = APIRouter()
 
-STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
-UPLOAD_DIR = STATIC_DIR / "uploads" / "products"
+SUPABASE_BUCKET = "product-photos"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
@@ -189,7 +188,7 @@ async def upload_product_photo(
     admin_user: dict = Depends(get_current_admin_user)
 ):
     """
-    Mengunggah berkas gambar foto produk secara langsung (Khusus Admin).
+    Mengunggah berkas gambar foto produk ke Supabase Storage (Khusus Admin).
     Format yang didukung: JPEG, PNG, WebP. Maksimum 5 MB.
     """
     product = db.query(Product).filter(Product.id == product_id).first()
@@ -213,19 +212,23 @@ async def upload_product_photo(
             detail="Ukuran file terlalu besar. Maksimum 5MB."
         )
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
     ext = Path(file.filename or "").suffix.lower()
     if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
         ext = ".jpg" if "jpeg" in content_type else ".png"
 
     filename = f"{uuid.uuid4().hex}{ext}"
-    file_path = UPLOAD_DIR / filename
 
-    with open(file_path, "wb") as f:
-        f.write(contents)
+    try:
+        supabase.storage.from_(SUPABASE_BUCKET).upload(filename, contents, {"content-type": content_type})
 
-    product.foto_url = f"/static/uploads/products/{filename}"
-    db.commit()
-    db.refresh(product)
-    return product
+        photo_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+
+        product.foto_url = photo_url
+        db.commit()
+        db.refresh(product)
+        return product
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal mengunggah foto ke Supabase: {str(e)}"
+        )
