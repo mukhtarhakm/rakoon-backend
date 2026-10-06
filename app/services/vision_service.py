@@ -53,27 +53,15 @@ LUNA_USER_PROMPT = (
 )
 
 
-def get_api_credentials() -> Tuple[str, str, str, str]:
+def get_api_credentials() -> Tuple[str, str, str]:
     """
-    Mengambil konfigurasi provider, API key, base URL, serta model utama (gpt-5.6-luna).
-    Provider yang didukung:
-    - 'groq' : Fallback gratis sementara (menggunakan model Qwen/Llama di Groq LPU)
-    - 'openai': Model utama gpt-5.6-luna
+    Mengambil konfigurasi API key, base URL, serta model utama (gpt-5.6-luna).
     """
-    provider = os.getenv("AI_VISION_PROVIDER", "").strip().lower()
-
-    if provider == "groq":
-        api_key = (os.getenv("GROQ_API_KEY") or "").strip()
-        base_url = (os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
-        model = os.getenv("GROQ_MODEL") or "qwen/qwen3.8-27b"
-        return "groq", api_key, base_url, model
-
-    # Default provider: openai
     api_key = (os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY") or "").strip()
     base_url = (os.getenv("OPENAI_BASE_URL") or os.getenv("AI_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
     primary_model = os.getenv("PRIMARY_VISION_MODEL") or os.getenv("OPENAI_MODEL_PRIMARY") or DEFAULT_PRIMARY_MODEL
 
-    return "openai", api_key, base_url, primary_model
+    return api_key, base_url, primary_model
 
 
 def clean_numeric(val: Any) -> Optional[float]:
@@ -280,9 +268,6 @@ async def send_vision_request(
         ]
     }
 
-    if "qwen" in model.lower():
-        payload["reasoning_effort"] = "none"
-
     logger.info(f"Dispatching vision inference request to model '{model}' at '{url}'...")
     response = await client.post(url, headers=headers, json=payload, timeout=timeout)
 
@@ -306,55 +291,6 @@ async def send_vision_request(
     return response.json()
 
 
-async def _process_groq_fallback(
-    client: httpx.AsyncClient,
-    groq_api_key: str,
-    base64_image: str,
-    content_type: str
-) -> ScanResponse:
-    groq_model = os.getenv("GROQ_MODEL") or "qwen/qwen3.8-27b"
-    groq_base_url = (os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
-    try:
-        logger.info(f"[Groq Fallback] Processing shelf image using Groq model '{groq_model}'...")
-        data = await send_vision_request(
-            client=client,
-            base_url=groq_base_url,
-            api_key=groq_api_key,
-            model=groq_model,
-            system_prompt=LUNA_SYSTEM_PROMPT,
-            user_prompt=LUNA_USER_PROMPT,
-            base64_image=base64_image,
-            content_type=content_type,
-            timeout=30.0
-        )
-        choices = data.get("choices", [])
-        content = choices[0]["message"]["content"] if choices else ""
-        parsed = extract_and_parse_json(content)
-        raw_items = parsed.get("detected") if isinstance(parsed, dict) else parsed
-        items = parse_raw_items(raw_items)
-        if not items:
-            return ScanResponse(
-                detected=[],
-                model_used=f"{groq_model} (Groq)",
-                escalated_to_verification=False,
-                message="Tidak ada produk terdeteksi di rak, coba foto ulang dengan pencahayaan lebih jelas."
-            )
-        return ScanResponse(
-            detected=items,
-            model_used=f"{groq_model} (Groq)",
-            escalated_to_verification=False,
-            message=None
-        )
-    except Exception as e:
-        logger.error(f"[Groq Fallback] Failed: {str(e)}")
-        return ScanResponse(
-            detected=[],
-            model_used=f"{groq_model} (Groq)",
-            escalated_to_verification=False,
-            message=f"Gagal memproses gambar melalui fallback Groq: {str(e)}"
-        )
-
-
 async def process_shelf_image(
     image_bytes: bytes,
     content_type: str,
@@ -362,16 +298,14 @@ async def process_shelf_image(
 ) -> ScanResponse:
     """
     Pipeline AI Vision:
-    - Mode 'groq': Fallback gratis sementara menggunakan Groq LPU (qwen/qwen3.8-27b).
-    - Mode 'openai': Single-Pass inferensi cepat menggunakan model gpt-5.6-luna.
-      Jika kredit OpenAI habis, otomatis fallback ke Groq agar pemindaian tetap berhasil.
+    Single-pass inferensi cepat membaca rak belanja menggunakan model gpt-5.6-luna (OpenAI).
     """
-    provider, api_key, base_url, primary_model = get_api_credentials()
+    api_key, base_url, primary_model = get_api_credentials()
     if not api_key or api_key.startswith("your_"):
         logger.error("Vision API Key is not properly configured.")
         return ScanResponse(
             detected=[],
-            message=f"API Key untuk provider '{provider}' belum dikonfigurasi di file .env."
+            message="API Key OpenAI belum dikonfigurasi di file .env."
         )
 
     # Encode image ke Base64
@@ -391,13 +325,6 @@ async def process_shelf_image(
         close_client = True
 
     try:
-        # Jika provider aktif adalah Groq (fallback sementara)
-        if provider == "groq":
-            return await _process_groq_fallback(client, api_key, base64_image, content_type)
-
-        # ---------------------------------------------------------
-        # Inferensi langsung menggunakan gpt-5.6-luna
-        # ---------------------------------------------------------
         logger.info(f"[Luna Vision] Processing image with model '{primary_model}'...")
         try:
             luna_data = await send_vision_request(
@@ -418,19 +345,6 @@ async def process_shelf_image(
             luna_items = parse_raw_items(raw_luna_items)
         except Exception as e:
             err_str = str(e)
-            groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
-            if ("saldo kredit" in err_str.lower() or "credit balance exhausted" in err_str.lower()) and groq_key and not groq_key.startswith("your_"):
-                logger.warning("[Auto Fallback] OpenAI credit exhausted ($0). Automatically falling back to Groq LPU...")
-                return await _process_groq_fallback(client, groq_key, base64_image, content_type)
-
-            if "saldo kredit" in err_str.lower() or "credit balance exhausted" in err_str.lower() or "unauthorized" in err_str.lower():
-                logger.error(f"[Luna Vision] Critical OpenAI error: {err_str}")
-                return ScanResponse(
-                    detected=[],
-                    model_used=primary_model,
-                    escalated_to_verification=False,
-                    message=err_str
-                )
             logger.error(f"[Luna Vision] Luna call failed: {err_str}")
             return ScanResponse(
                 detected=[],

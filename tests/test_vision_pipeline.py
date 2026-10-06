@@ -195,12 +195,11 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(response.detected), 0)
         self.assertIn("Gagal memproses gambar", response.message)
 
-    async def test_groq_fallback_mode(self):
+    async def test_custom_primary_vision_model(self):
         """
-        Jika AI_VISION_PROVIDER diset ke 'groq', sistem harus menggunakan model Groq
-        (qwen/qwen3.8-27b) untuk memproses gambar secara gratis tanpa OpenAI.
+        Memastikan custom PRIMARY_VISION_MODEL dari environment variable digunakan dengan benar.
         """
-        groq_items = [
+        custom_items = [
             {
                 "nama_produk": "Sari Roti Tawar Kupas",
                 "harga": 16000,
@@ -212,12 +211,11 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
         ]
 
         mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.post.return_value = self._create_mock_response("qwen/qwen3.8-27b", groq_items)
+        mock_client.post.return_value = self._create_mock_response("gpt-5.6-custom", custom_items)
 
         with patch.dict("os.environ", {
-            "AI_VISION_PROVIDER": "groq",
-            "GROQ_API_KEY": "gsk-test-key",
-            "GROQ_MODEL": "qwen/qwen3.8-27b"
+            "OPENAI_API_KEY": "sk-test-key",
+            "PRIMARY_VISION_MODEL": "gpt-5.6-custom"
         }):
             response = await process_shelf_image(
                 image_bytes=self.dummy_image_bytes,
@@ -227,9 +225,8 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(mock_client.post.call_count, 1)
         call_args = mock_client.post.call_args[1]
-        self.assertEqual(call_args["json"]["model"], "qwen/qwen3.8-27b")
-        self.assertEqual(call_args["json"]["reasoning_effort"], "none")
-        self.assertIn("qwen/qwen3.8-27b", response.model_used)
+        self.assertEqual(call_args["json"]["model"], "gpt-5.6-custom")
+        self.assertEqual(response.model_used, "gpt-5.6-custom")
         self.assertEqual(len(response.detected), 1)
         self.assertEqual(response.detected[0].nama_produk, "Sari Roti Tawar Kupas")
 

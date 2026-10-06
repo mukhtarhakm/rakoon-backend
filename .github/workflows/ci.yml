@@ -33,7 +33,8 @@ jobs:
       - name: Run Pytest Suite
         env:
           DATABASE_URL: sqlite:///./test_ci.db
-          GROQ_API_KEY: ci_mock_key
+          OPENAI_API_KEY: ci_mock_key
+          PRIMARY_VISION_MODEL: gpt-5.6-luna
           SUPABASE_URL: https://mock.supabase.co
           SUPABASE_SERVICE_KEY: mock.jwt.key
         run: python -m pytest -v

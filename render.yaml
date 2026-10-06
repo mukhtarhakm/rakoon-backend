@@ -14,10 +14,12 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
-      - key: GROQ_API_KEY
-        sync: false
-      - key: GROQ_MODEL
-        value: qwen/qwen3.8-27b
+      - key: OPENAI_API_KEY
+        sync: false        # Diisi manual di Render Dashboard
+      - key: PRIMARY_VISION_MODEL
+        value: gpt-5.6-luna
+      - key: OPENAI_BASE_URL
+        value: https://api.openai.com/v1
       - key: ADMIN_EMAILS
         sync: false        # Diisi manual di Render Dashboard
     healthCheckPath: /health
