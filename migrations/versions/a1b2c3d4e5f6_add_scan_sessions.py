@@ -19,28 +19,37 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        'scan_sessions',
-        sa.Column('id', sa.Uuid(as_uuid=False), nullable=False),
-        sa.Column('user_id', sa.Uuid(as_uuid=False), nullable=False),
-        sa.Column('store_id', sa.Uuid(as_uuid=False), nullable=False),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
-        sa.ForeignKeyConstraint(['store_id'], ['stores.id']),
-        sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index(op.f('ix_scan_sessions_id'), 'scan_sessions', ['id'], unique=False)
-    op.create_index(op.f('ix_scan_sessions_user_id'), 'scan_sessions', ['user_id'], unique=False)
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = inspector.get_table_names()
 
-    op.add_column('price_entries', sa.Column('scan_session_id', sa.Uuid(as_uuid=False), nullable=True))
-    op.create_index(op.f('ix_price_entries_scan_session_id'), 'price_entries', ['scan_session_id'], unique=False)
-    op.create_foreign_key('fk_price_entries_scan_session_id', 'price_entries', 'scan_sessions', ['scan_session_id'], ['id'])
+    if 'scan_sessions' not in tables:
+        op.create_table(
+            'scan_sessions',
+            sa.Column('id', sa.Uuid(as_uuid=False), nullable=False),
+            sa.Column('user_id', sa.Uuid(as_uuid=False), nullable=False),
+            sa.Column('store_id', sa.Uuid(as_uuid=False), nullable=False),
+            sa.Column('created_at', sa.DateTime(), nullable=False),
+            sa.ForeignKeyConstraint(['store_id'], ['stores.id']),
+            sa.PrimaryKeyConstraint('id')
+        )
+        op.create_index(op.f('ix_scan_sessions_id'), 'scan_sessions', ['id'], unique=False)
+        op.create_index(op.f('ix_scan_sessions_user_id'), 'scan_sessions', ['user_id'], unique=False)
+
+    pe_cols = [c['name'] for c in inspector.get_columns('price_entries')]
+    if 'scan_session_id' not in pe_cols:
+        with op.batch_alter_table('price_entries') as batch_op:
+            batch_op.add_column(sa.Column('scan_session_id', sa.Uuid(as_uuid=False), nullable=True))
+            batch_op.create_index(op.f('ix_price_entries_scan_session_id'), ['scan_session_id'], unique=False)
+            batch_op.create_foreign_key('fk_price_entries_scan_session_id', 'scan_sessions', ['scan_session_id'], ['id'])
 
 
 
 def downgrade() -> None:
-    op.drop_constraint('fk_price_entries_scan_session_id', 'price_entries', type_='foreignkey')
-    op.drop_index(op.f('ix_price_entries_scan_session_id'), table_name='price_entries')
-    op.drop_column('price_entries', 'scan_session_id')
+    with op.batch_alter_table('price_entries') as batch_op:
+        batch_op.drop_constraint('fk_price_entries_scan_session_id', type_='foreignkey')
+        batch_op.drop_index(op.f('ix_price_entries_scan_session_id'))
+        batch_op.drop_column('scan_session_id')
     op.drop_index(op.f('ix_scan_sessions_user_id'), table_name='scan_sessions')
     op.drop_index(op.f('ix_scan_sessions_id'), table_name='scan_sessions')
     op.drop_table('scan_sessions')

@@ -8,7 +8,7 @@ from sqlalchemy import pool
 from alembic import context
 
 # Load .env environment variables
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -75,7 +75,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            render_as_batch=(connection.dialect.name == "sqlite"),
         )
 
         with context.begin_transaction():

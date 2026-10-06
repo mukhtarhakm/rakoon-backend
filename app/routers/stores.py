@@ -169,22 +169,6 @@ def get_store_products(store_id: str, db: Session = Depends(get_db)):
                     )
                 )
     
-    if not products_out:
-        sample_prods = db.query(Product).limit(10).all()
-        for p in sample_prods:
-            products_out.append(
-                StoreProductItem(
-                    id=str(p.id),
-                    nama=p.nama,
-                    kategori=p.kategori or "Kebutuhan Pokok",
-                    ukuran=p.ukuran,
-                    satuan=p.satuan,
-                    harga=14500.0,
-                    foto_url=getattr(p, "foto_url", None),
-                    updated_at=None
-                )
-            )
-            
     return products_out
 
 
