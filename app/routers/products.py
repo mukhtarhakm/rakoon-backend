@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from pathlib import Path
 import uuid
 import os
+import logging
 
 from app.database import get_db, supabase
 from app.models.db_models import Product
@@ -13,9 +14,11 @@ from app.dependencies import get_current_admin_user
 
 from uuid import UUID
 
+logger = logging.getLogger("rakoon_backend.products")
 router = APIRouter()
 
 SUPABASE_BUCKET = "product-photos"
+STATIC_UPLOADS_DIR = Path(__file__).resolve().parent.parent.parent / "static" / "uploads" / "products"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
@@ -167,7 +170,12 @@ def update_product_photo_url(
     """
     Mengubah atau memperbarui URL foto produk (Khusus Admin).
     """
-    product = db.query(Product).filter(Product.id == product_id).first()
+    try:
+        product = db.query(Product).filter(Product.id == product_id).first()
+    except Exception:
+        db.rollback()
+        product = None
+
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -189,9 +197,15 @@ async def upload_product_photo(
 ):
     """
     Mengunggah berkas gambar foto produk ke Supabase Storage (Khusus Admin).
+    Jika Supabase Storage tidak tersedia, otomatis fallback ke penyimpanan lokal /static/uploads/products/.
     Format yang didukung: JPEG, PNG, WebP. Maksimum 5 MB.
     """
-    product = db.query(Product).filter(Product.id == product_id).first()
+    try:
+        product = db.query(Product).filter(Product.id == product_id).first()
+    except Exception:
+        db.rollback()
+        product = None
+
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -217,18 +231,35 @@ async def upload_product_photo(
         ext = ".jpg" if "jpeg" in content_type else ".png"
 
     filename = f"{uuid.uuid4().hex}{ext}"
+    photo_url: Optional[str] = None
+    upload_error: Optional[str] = None
 
-    try:
-        supabase.storage.from_(SUPABASE_BUCKET).upload(filename, contents, {"content-type": content_type})
+    # 1. Coba simpan ke Supabase Storage jika client aktif
+    if hasattr(supabase, "storage"):
+        try:
+            supabase.storage.from_(SUPABASE_BUCKET).upload(filename, contents, {"content-type": content_type})
+            photo_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+        except Exception as exc:
+            upload_error = str(exc)
+            logger.warning(f"Gagal mengunggah ke Supabase Storage ({exc}). Beralih ke penyimpanan statis lokal.")
 
-        photo_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+    # 2. Fallback ke penyimpanan statis lokal jika Supabase Storage gagal atau belum dikonfigurasi
+    if not photo_url:
+        try:
+            STATIC_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            local_file_path = STATIC_UPLOADS_DIR / filename
+            with open(local_file_path, "wb") as f:
+                f.write(contents)
+            photo_url = f"/static/uploads/products/{filename}"
+            logger.info(f"Foto berhasil disimpan secara lokal: {photo_url}")
+        except Exception as local_err:
+            logger.error(f"Penyimpanan berkas lokal juga gagal: {local_err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Gagal menyimpan foto produk: {upload_error or str(local_err)}"
+            )
 
-        product.foto_url = photo_url
-        db.commit()
-        db.refresh(product)
-        return product
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Gagal mengunggah foto ke Supabase: {str(e)}"
-        )
+    product.foto_url = photo_url
+    db.commit()
+    db.refresh(product)
+    return product

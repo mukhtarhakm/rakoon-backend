@@ -206,7 +206,12 @@ def get_current_user_profile(
     user_meta = payload.get("user_metadata", {})
     nama = user_meta.get("name") or user_meta.get("full_name") or user_meta.get("display_name")
 
-    user_db = db.query(User).filter(User.id == user_id).first()
+    user_db = None
+    try:
+        user_db = db.query(User).filter(User.id == str(user_id)).first()
+    except Exception as e:
+        logger.warning(f"Error querying user_db for user_id '{user_id}': {e}")
+        db.rollback()
     if user_db:
         if not email and user_db.email:
             email = user_db.email

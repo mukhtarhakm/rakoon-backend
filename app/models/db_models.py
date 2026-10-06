@@ -7,7 +7,7 @@ from app.database import Base
 class User(Base):
     __tablename__ = "users"
     
-    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     nama = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     reputasi_score = Column(Integer, default=0)
