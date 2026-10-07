@@ -2,6 +2,7 @@ import io
 import os
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -75,7 +76,20 @@ class TestAdminProducts(unittest.TestCase):
         self.db.add(admin_user)
         self.db.commit()
 
+        # Mock Supabase Storage to prevent polluting live storage with test artifacts
+        self.mock_sb = MagicMock()
+        mock_bucket = MagicMock()
+        def fake_get_public_url(fname):
+            return f"https://mock.supabase.co/storage/v1/object/public/product-photos/{fname}"
+        mock_bucket.get_public_url.side_effect = fake_get_public_url
+        mock_bucket.upload.return_value = {"Key": "mocked"}
+        self.mock_sb.storage.from_.return_value = mock_bucket
+
+        self.mock_sb_patch = patch("app.routers.products.supabase", self.mock_sb)
+        self.mock_sb_patch.start()
+
     def tearDown(self):
+        self.mock_sb_patch.stop()
         app.dependency_overrides.clear()
         self.db.close()
         Base.metadata.drop_all(bind=engine)
@@ -209,3 +223,28 @@ class TestAdminProducts(unittest.TestCase):
         matched = [i for i in items if i["id"] == self.prod_id]
         self.assertEqual(len(matched), 1)
         self.assertEqual(matched[0]["foto_url"], test_url)
+
+    def test_get_product_by_id_returns_photo_url(self):
+        """GET /products/{id} returns product details including updated foto_url"""
+        test_url = "https://images.example.com/susu-detail.jpg"
+        prod = self.db.query(Product).filter(Product.id == self.prod_id).first()
+        prod.foto_url = test_url
+        self.db.commit()
+
+        res = self.client.get(f"/products/{self.prod_id}")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["id"], self.prod_id)
+        self.assertEqual(data["foto_url"], test_url)
+
+    def test_price_compare_contains_product_photo_url(self):
+        """GET /price/compare/{id} response includes foto_url for product detail synchronization"""
+        test_url = "https://images.example.com/susu-compare.jpg"
+        prod = self.db.query(Product).filter(Product.id == self.prod_id).first()
+        prod.foto_url = test_url
+        self.db.commit()
+
+        res = self.client.get(f"/price/compare/{self.prod_id}?lat=-7.56&lng=110.82")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["foto_url"], test_url)

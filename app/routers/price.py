@@ -379,6 +379,7 @@ def get_price_comparison(
         return PriceCompareResponse(
             product_id=prod_id_parsed,
             nama_produk=product.nama,
+            foto_url=getattr(product, "foto_url", None),
             comparison=comparison_list,
         )
 

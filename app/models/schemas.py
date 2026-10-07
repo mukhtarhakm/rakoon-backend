@@ -179,6 +179,7 @@ class PriceCompareItem(BaseModel):
 class PriceCompareResponse(BaseModel):
     product_id: Union[int, str] = Field(..., description="ID dari produk")
     nama_produk: str = Field(..., description="Nama produk")
+    foto_url: Optional[str] = Field(None, description="URL foto produk")
     comparison: List[PriceCompareItem] = Field(default_factory=list, description="Daftar perbandingan harga di toko terdekat")
 
 

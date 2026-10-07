@@ -159,6 +159,25 @@ def get_products_catalog(
     return catalog_items
 
 
+@router.get("/{product_id}", response_model=ProductOut, status_code=status.HTTP_200_OK)
+def get_product_by_id(product_id: str, db: Session = Depends(get_db)):
+    """
+    Mengambil data produk spesifik berdasarkan product_id (termasuk foto_url).
+    """
+    try:
+        product = db.query(Product).filter(Product.id == product_id).first()
+    except Exception:
+        db.rollback()
+        product = None
+
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Produk dengan ID '{product_id}' tidak ditemukan."
+        )
+    return product
+
+
 @router.put("/{product_id}/photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
 @router.patch("/{product_id}/photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
 def update_product_photo_url(
