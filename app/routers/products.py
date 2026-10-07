@@ -188,6 +188,50 @@ def update_product_photo_url(
     return product
 
 
+def detect_image_type(
+    filename: Optional[str],
+    declared_content_type: Optional[str],
+    contents: bytes
+) -> tuple[str, str]:
+    """
+    Mendeteksi tipe MIME dan ekstensi gambar berdasarkan signature bytes (magic numbers),
+    ekstensi berkas, atau declared content-type dari multipart request.
+    Mengembalikan (normalized_content_type, extension) seperti ("image/jpeg", ".jpg").
+    Melemparkan HTTPException(400) jika bukan gambar valid.
+    """
+    raw_ct = (declared_content_type or "").lower().split(";")[0].strip()
+    ext = Path(filename or "").suffix.lower()
+
+    # 1. Deteksi melalui magic bytes (signature file sebenarnya)
+    if contents.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if contents.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if contents.startswith(b"RIFF") and len(contents) >= 12 and contents[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+
+    # 2. Deteksi melalui ekstensi file (misalnya .jpg, .jpeg, .png, .webp)
+    if ext in [".jpg", ".jpeg"]:
+        return "image/jpeg", ".jpg"
+    if ext == ".png":
+        return "image/png", ".png"
+    if ext == ".webp":
+        return "image/webp", ".webp"
+
+    # 3. Deteksi melalui declared content_type jika ekstensi / signature belum matched
+    if raw_ct in ["image/jpeg", "image/jpg", "image/pjpeg"]:
+        return "image/jpeg", ".jpg"
+    if raw_ct in ["image/png", "image/x-png"]:
+        return "image/png", ".png"
+    if raw_ct == "image/webp":
+        return "image/webp", ".webp"
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Format file tidak valid. Gunakan format JPEG, PNG, atau WebP."
+    )
+
+
 @router.post("/{product_id}/upload-photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
 async def upload_product_photo(
     product_id: str,
@@ -212,23 +256,25 @@ async def upload_product_photo(
             detail=f"Produk dengan ID '{product_id}' tidak ditemukan."
         )
 
-    content_type = (file.content_type or "").lower().strip()
-    if content_type not in ALLOWED_IMAGE_TYPES:
+    contents = await file.read()
+    if not contents:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Format file tidak valid. Gunakan format JPEG, PNG, atau WebP."
+            detail="Berkas foto yang diunggah kosong."
         )
 
-    contents = await file.read()
     if len(contents) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Ukuran file terlalu besar. Maksimum 5MB."
         )
 
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
-        ext = ".jpg" if "jpeg" in content_type else ".png"
+    # Validasi dan normalisasi tipe konten serta ekstensi berkas
+    content_type, ext = detect_image_type(
+        filename=file.filename,
+        declared_content_type=file.content_type,
+        contents=contents
+    )
 
     filename = f"{uuid.uuid4().hex}{ext}"
     photo_url: Optional[str] = None
@@ -237,8 +283,13 @@ async def upload_product_photo(
     # 1. Coba simpan ke Supabase Storage jika client aktif
     if hasattr(supabase, "storage"):
         try:
-            supabase.storage.from_(SUPABASE_BUCKET).upload(filename, contents, {"content-type": content_type})
-            photo_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+            supabase.storage.from_(SUPABASE_BUCKET).upload(
+                filename,
+                contents,
+                {"content-type": content_type, "upsert": "true"}
+            )
+            raw_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+            photo_url = raw_url.rstrip("?") if raw_url else None
         except Exception as exc:
             upload_error = str(exc)
             logger.warning(f"Gagal mengunggah ke Supabase Storage ({exc}). Beralih ke penyimpanan statis lokal.")

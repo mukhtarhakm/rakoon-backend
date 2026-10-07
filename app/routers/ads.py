@@ -13,6 +13,7 @@ from app.database import get_db, supabase
 from app.dependencies import get_current_user
 from app.models.db_models import Store, StoreOwner, AdCampaign
 from app.routers.stores import haversine_distance
+from app.routers.products import detect_image_type
 
 logger = logging.getLogger("rakoon_backend.ads")
 
@@ -308,28 +309,33 @@ async def upload_ad_banner(
     """
     Mengunggah berkas foto flyer iklan promo ke Supabase Storage.
     """
-    content_type = (file.content_type or "").lower().strip()
-    if content_type not in ALLOWED_IMAGE_TYPES:
+    contents = await file.read()
+    if not contents:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Format file tidak valid. Gunakan JPEG, PNG, atau WebP."
+            detail="Berkas foto flyer kosong."
         )
 
-    contents = await file.read()
     if len(contents) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Ukuran file terlalu besar. Maksimum 5MB."
         )
 
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
-        ext = ".jpg" if "jpeg" in content_type else ".png"
+    content_type, ext = detect_image_type(
+        filename=file.filename,
+        declared_content_type=file.content_type,
+        contents=contents
+    )
 
     filename = f"ad_{uuid.uuid4().hex}{ext}"
 
     try:
-        supabase.storage.from_(SUPABASE_BUCKET).upload(filename, contents, {"content-type": content_type})
+        supabase.storage.from_(SUPABASE_BUCKET).upload(
+            filename,
+            contents,
+            {"content-type": content_type, "upsert": "true"}
+        )
         banner_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename).rstrip("?")
         return {"banner_url": banner_url}
     except Exception as e:

@@ -172,6 +172,19 @@ class TestAdminProducts(unittest.TestCase):
         self.assertTrue(data["foto_url"].startswith("https://"))
         self.assertTrue(data["foto_url"].rstrip("?").endswith(".png"))
 
+    def test_upload_photo_jpg_with_octet_stream_success(self):
+        """Admin can upload .jpg file even when client sends application/octet-stream or generic content-type"""
+        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        fake_jpg = io.BytesIO(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01Fake JPEG content")
+        res = self.client.post(
+            f"/products/{self.prod_id}/upload-photo",
+            files={"file": ("product.jpg", fake_jpg, "application/octet-stream")}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data["foto_url"].startswith("https://") or data["foto_url"].startswith("/static/uploads/"))
+        self.assertTrue(data["foto_url"].rstrip("?").endswith(".jpg"))
+
     def test_upload_photo_invalid_type_rejected(self):
         app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
         fake_text = io.BytesIO(b"Hello world text file")
