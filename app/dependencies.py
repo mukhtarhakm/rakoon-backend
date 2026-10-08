@@ -193,7 +193,7 @@ def get_current_user_profile(
     Role ditentukan secara hirarkis:
     1. Kolom role di database users ('admin' vs 'user').
     2. Email terdaftar di konfigurasi env ADMIN_EMAILS.
-    3. Metadata JWT Supabase (app_metadata['role'] atau user_metadata['role']).
+    3. Klaim JWT yang dikelola server (app_metadata['role'] atau role).
     """
     payload = {}
     if credentials and credentials.credentials:
@@ -239,7 +239,6 @@ def get_current_user_profile(
     app_meta = payload.get("app_metadata", {})
     jwt_role = (
         app_meta.get("role")
-        or user_meta.get("role")
         or payload.get("role")
     )
     if jwt_role == "admin":
