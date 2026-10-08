@@ -76,8 +76,9 @@ class StoreOwner(Base):
     id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
     store_id = Column(Uuid(as_uuid=False), ForeignKey("stores.id"), nullable=False, index=True)
-    status = Column(String, default="verified", nullable=False)
+    status = Column(String, default="pending", nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
 
     store = relationship("Store")
 

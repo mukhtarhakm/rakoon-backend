@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.database import get_db, supabase
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin_user
 from app.models.db_models import Store, StoreOwner, AdCampaign
 from app.routers.stores import haversine_distance
 from app.routers.products import detect_image_type
@@ -86,8 +86,21 @@ class ClaimStoreRequest(BaseModel):
     store_id: str = Field(..., description="ID toko yang ingin diklaim/dikelola")
 
 
+class VerifyStoreClaimRequest(BaseModel):
+    user_id: str = Field(..., description="ID pengguna yang mengajukan klaim")
+    store_id: str = Field(..., description="ID toko yang diklaim")
+
+
+class PendingStoreClaimItem(BaseModel):
+    user_id: str
+    store_id: str
+    store_nama: str
+    created_at: str
+
+
 class MyStoreResponse(BaseModel):
     is_claimed: bool
+    claim_status: Optional[str] = None
     store_id: Optional[str] = None
     store_nama: Optional[str] = None
     store_alamat: Optional[str] = None
@@ -148,6 +161,13 @@ def get_home_banners(
     store_ids = {c.store_id for c in campaigns}
     stores = db.query(Store).filter(Store.id.in_(store_ids)).all()
     store_map = {str(s.id): s for s in stores}
+    verified_owners = {
+        (str(owner.user_id), str(owner.store_id))
+        for owner in db.query(StoreOwner).filter(
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+        ).all()
+    }
 
     # Titik acuan default Yogyakarta (Tugu / Malioboro) jika user berada sangat jauh (misal juri di luar kota)
     jogja_center_lat, jogja_center_lng = -7.7829, 110.4083
@@ -157,6 +177,11 @@ def get_home_banners(
     banner_items: List[HomeBannerItem] = []
 
     for c in campaigns:
+        # Legacy campaigns are hidden until their owner has been approved by admin.
+        if str(c.owner_user_id) != "00000000-0000-0000-0000-000000000000" and (
+            str(c.owner_user_id), str(c.store_id)
+        ) not in verified_owners:
+            continue
         store = store_map.get(str(c.store_id))
         if not store:
             continue
@@ -257,7 +282,8 @@ def get_my_store(
         )
 
     return MyStoreResponse(
-        is_claimed=True,
+        is_claimed=owner.status == "verified" and owner.verified_at is not None,
+        claim_status="verified" if owner.status == "verified" and owner.verified_at is not None else "pending",
         store_id=str(store.id),
         store_nama=store.nama,
         store_alamat=store.alamat,
@@ -283,17 +309,40 @@ def claim_store(
             detail="Toko yang dipilih tidak ditemukan."
         )
 
+    existing_owner = (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.store_id == store.id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+        )
+        .first()
+    )
+    if existing_owner and str(existing_owner.user_id) != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Toko ini sudah memiliki pemilik terverifikasi."
+        )
+
     owner = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).first()
     if not owner:
         owner = StoreOwner(
             user_id=user_id,
             store_id=store.id,
-            status="verified"
+            status="pending"
         )
         db.add(owner)
     else:
+        if owner.status == "verified" and owner.verified_at is not None:
+            if str(owner.store_id) != str(store.id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Akun ini sudah menjadi pemilik terverifikasi toko lain."
+                )
+            return get_my_store(user_id=user_id, db=db)
         owner.store_id = store.id
-        owner.status = "verified"
+        owner.status = "pending"
+        owner.verified_at = None
 
     db.commit()
     db.refresh(owner)
@@ -301,14 +350,90 @@ def claim_store(
     return get_my_store(user_id=user_id, db=db)
 
 
+@router.get("/pending-claims", response_model=List[PendingStoreClaimItem], status_code=status.HTTP_200_OK)
+def get_pending_store_claims(
+    admin_user: dict = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Daftar klaim yang harus diperiksa oleh admin."""
+    rows = (
+        db.query(StoreOwner, Store)
+        .join(Store, StoreOwner.store_id == Store.id)
+        .filter((StoreOwner.status != "verified") | (StoreOwner.verified_at.is_(None)))
+        .order_by(StoreOwner.created_at.asc())
+        .all()
+    )
+    return [
+        PendingStoreClaimItem(
+            user_id=str(owner.user_id),
+            store_id=str(store.id),
+            store_nama=store.nama,
+            created_at=owner.created_at.isoformat(),
+        )
+        for owner, store in rows
+    ]
+
+
+@router.post("/verify-claim", response_model=MyStoreResponse, status_code=status.HTTP_200_OK)
+def verify_store_claim(
+    payload: VerifyStoreClaimRequest,
+    admin_user: dict = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Setujui klaim toko setelah bukti kepemilikan diperiksa oleh admin."""
+    owner = (
+        db.query(StoreOwner)
+        .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
+        .first()
+    )
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
+
+    # Serialize approvals for the same store on PostgreSQL before checking ownership.
+    db.query(Store).filter(Store.id == owner.store_id).with_for_update().first()
+    other_owner = (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.store_id == owner.store_id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+            StoreOwner.user_id != owner.user_id,
+        )
+        .first()
+    )
+    if other_owner:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Toko sudah memiliki pemilik terverifikasi.")
+
+    owner.status = "verified"
+    owner.verified_at = datetime.now(timezone.utc)
+    db.commit()
+    return get_my_store(user_id=payload.user_id, db=db)
+
+
 @router.post("/upload-banner", status_code=status.HTTP_200_OK)
 async def upload_ad_banner(
     file: UploadFile = File(...),
-    user_id: str = Depends(get_current_user)
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """
     Mengunggah berkas foto flyer iklan promo ke Supabase Storage.
     """
+    owner = (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.user_id == user_id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+        )
+        .first()
+    )
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Hanya pemilik toko terverifikasi yang dapat mengunggah banner iklan."
+        )
+
     contents = await file.read()
     if not contents:
         raise HTTPException(
@@ -358,6 +483,22 @@ def create_ad_campaign(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Toko tidak ditemukan."
+        )
+
+    owner = (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.user_id == user_id,
+            StoreOwner.store_id == store.id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+        )
+        .first()
+    )
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Hanya pemilik toko terverifikasi yang dapat membuat kampanye iklan."
         )
 
     # Validasi paket durasi & biaya
