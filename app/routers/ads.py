@@ -1,3 +1,4 @@
+import os
 import math
 import uuid
 import logging
@@ -59,11 +60,12 @@ class HomeBannerItem(BaseModel):
     distance_km: float
     expires_at: str
     days_left: int
+    status: str = "active"
     payment_method: Optional[str] = "QRIS"
     payment_ref: Optional[str] = None
-    payment_status: Optional[str] = "paid"
+    payment_status: Optional[str] = "unpaid"
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "extra": "ignore"}
 
 
 class PricingPackageItem(BaseModel):
@@ -79,7 +81,9 @@ class CreateCampaignRequest(BaseModel):
     banner_url: str = Field(..., description="URL gambar flyer promo")
     duration_days: int = Field(3, description="Pilihan durasi: 3, 7, atau 14 hari")
     payment_method: Optional[str] = Field("QRIS", description="Metode pembayaran (QRIS, TRANSFER)")
-    payment_ref: Optional[str] = Field(None, description="Nomor referensi pembayaran unik (opsional)")
+    payment_ref: Optional[str] = Field(None, description="Diabaikan oleh server; referensi invoice resmi di-generate oleh server")
+
+    model_config = {"extra": "ignore"}
 
 
 class ClaimStoreRequest(BaseModel):
@@ -125,25 +129,69 @@ def _ensure_utc(dt: Optional[datetime]) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _has_verified_provider_proof(campaign: AdCampaign) -> bool:
+    """
+    Memeriksa apakah kampanye memiliki bukti pembayaran yang benar-benar terverifikasi
+    dari payment gateway resmi (Xendit).
+
+    PERINGATAN KEAMANAN:
+    Awalan string (seperti 'XND-' atau 'XENDIT-') BUKAN bukti pembayaran yang sah.
+    Selama integrasi payment gateway Xendit Sandbox belum selesai, belum ada mekanisme
+    verifikasi bukti pembayaran server-side yang dapat dipercaya.
+    Oleh karena itu, fungsi ini mengembalikan False secara fail-closed untuk mencegah
+    kampanye komersial ditayangkan tanpa bukti transaksi nyata dari provider.
+    """
+    return False
+
+
+def _is_demo_mode_allowed() -> bool:
+    """
+    Mode demo HANYA diizinkan jika secara eksplisit diaktifkan melalui konfigurasi server
+    (environment variable ALLOW_DEMO_ADS='true' dan bukan environment production).
+    Parameter request publik (include_demo) TIDAK BISA mengaktifkan mode demo
+    jika konfigurasi server tidak mengizinkannya atau pada environment production.
+    """
+    app_env = os.getenv("ENVIRONMENT", "development").lower()
+    if app_env == "production":
+        return False
+    return os.getenv("ALLOW_DEMO_ADS", "false").lower() == "true"
+
+
+def _is_demo_campaign(campaign: AdCampaign) -> bool:
+    """
+    Mengidentifikasi kampanye contoh/demo (misal seed awal sistem atau dummy testing).
+    """
+    owner_str = str(getattr(campaign, "owner_user_id", ""))
+    return (
+        owner_str == "00000000-0000-0000-0000-000000000000"
+        or getattr(campaign, "payment_status", "") == "demo"
+        or getattr(campaign, "payment_method", "") == "DEMO"
+    )
+
+
 @router.get("/home-banners", response_model=List[HomeBannerItem], status_code=status.HTTP_200_OK)
 def get_home_banners(
     lat: float = Query(-7.7829, description="Latitude posisi pengguna"),
     lng: float = Query(110.4083, description="Longitude posisi pengguna"),
     radius_km: float = Query(15.0, description="Maksimum radius toko dari pengguna dalam km"),
+    include_demo: bool = Query(False, description="Tampilkan banner contoh/demo secara eksplisit (terpisah dari iklan berbayar)"),
     db: Session = Depends(get_db)
 ):
     """
     Mengambil daftar banner iklan aktif dari toko terdekat di Yogyakarta.
-    Iklan disaring yang statusnya 'active' dan belum kedaluwarsa (expires_at > now).
-    Diurutkan dari jarak toko terdekat ke posisi pengguna.
+    Hanya kampanye yang memiliki bukti pembayaran resmi dari payment provider (Xendit)
+    yang ditayangkan sebagai iklan berbayar komersial.
+    Data historis berstatus 'paid' tanpa bukti provider tidak akan ditayangkan sebagai iklan komersial.
+    Banner demo hanya ditampilkan jika flag include_demo atau ALLOW_DEMO_ADS aktif, dan
+    ditandai secara transparan sebagai payment_status='demo'.
     """
     now = datetime.now(timezone.utc)
 
     # Pastikan data demo terinisialisasi jika tabel masih kosong
     _ensure_seed_campaigns(db)
 
-    # Ambil kampanye aktif
-    campaigns = (
+    # Ambil kampanye yang berstatus active
+    all_active = (
         db.query(AdCampaign)
         .filter(
             AdCampaign.status == "active"
@@ -151,8 +199,20 @@ def get_home_banners(
         .all()
     )
 
-    # Filter yang belum expired (aman untuk SQLite & PostgreSQL)
-    campaigns = [c for c in campaigns if _ensure_utc(c.expires_at) > now]
+    # Filter yang belum expired
+    unexpired = [c for c in all_active if _ensure_utc(c.expires_at) > now]
+
+    # Mode demo HANYA aktif jika diizinkan konfigurasi server non-production
+    # DAN diminta secara eksplisit melalui parameter query include_demo=True
+    is_demo_active = _is_demo_mode_allowed() and include_demo
+
+    # Filter ketat: Hanya iklan terverifikasi bukti provider resmi (fail-closed) atau demo terpisah
+    campaigns: List[AdCampaign] = []
+    for c in unexpired:
+        if _has_verified_provider_proof(c):
+            campaigns.append(c)
+        elif is_demo_active and _is_demo_campaign(c):
+            campaigns.append(c)
 
     if not campaigns:
         return []
@@ -169,7 +229,6 @@ def get_home_banners(
         ).all()
     }
 
-    # Titik acuan default Yogyakarta (Tugu / Malioboro) jika user berada sangat jauh (misal juri di luar kota)
     jogja_center_lat, jogja_center_lng = -7.7829, 110.4083
     user_dist_to_jogja = haversine_distance(lat, lng, jogja_center_lat, jogja_center_lng)
     is_outside_jogja = user_dist_to_jogja > 50.0
@@ -177,10 +236,9 @@ def get_home_banners(
     banner_items: List[HomeBannerItem] = []
 
     for c in campaigns:
-        # Legacy campaigns are hidden until their owner has been approved by admin.
-        if str(c.owner_user_id) != "00000000-0000-0000-0000-000000000000" and (
-            str(c.owner_user_id), str(c.store_id)
-        ) not in verified_owners:
+        is_demo = _is_demo_campaign(c)
+        # Jika bukan demo, pastikan pemilik toko terverifikasi
+        if not is_demo and (str(c.owner_user_id), str(c.store_id)) not in verified_owners:
             continue
         store = store_map.get(str(c.store_id))
         if not store:
@@ -189,19 +247,15 @@ def get_home_banners(
         store_lat = store.lat if store.lat is not None else jogja_center_lat
         store_lng = store.lng if store.lng is not None else jogja_center_lng
 
-        # Hitung jarak
         if is_outside_jogja:
-            # Fallback untuk juri yang mengakses dari luar kota DIY: hitung jarak dari pusat Jogja
             dist = haversine_distance(jogja_center_lat, jogja_center_lng, store_lat, store_lng)
         else:
             dist = haversine_distance(lat, lng, store_lat, store_lng)
 
-        # Hitung sisa hari
         exp_utc = _ensure_utc(c.expires_at)
         delta = exp_utc - now
         days_left = max(1, delta.days + (1 if delta.seconds > 0 else 0))
 
-        # Filter radius jika pengguna berada di area Jogja
         if not is_outside_jogja and dist > radius_km:
             continue
 
@@ -220,13 +274,13 @@ def get_home_banners(
                 distance_km=round(dist, 1),
                 expires_at=c.expires_at.isoformat(),
                 days_left=days_left,
-                payment_method=getattr(c, "payment_method", "QRIS"),
+                status=getattr(c, "status", "active"),
+                payment_method="DEMO" if is_demo else getattr(c, "payment_method", "QRIS"),
                 payment_ref=getattr(c, "payment_ref", None),
-                payment_status=getattr(c, "payment_status", "paid")
+                payment_status="demo" if is_demo else "paid"
             )
         )
 
-    # Sort berdasarkan jarak terdekat
     banner_items.sort(key=lambda x: (x.distance_km, x.days_left))
     return banner_items
 
@@ -275,9 +329,10 @@ def get_my_store(
                 distance_km=0.0,
                 expires_at=c.expires_at.isoformat(),
                 days_left=days_left,
+                status=getattr(c, "status", "active"),
                 payment_method=getattr(c, "payment_method", "QRIS"),
                 payment_ref=getattr(c, "payment_ref", None),
-                payment_status=getattr(c, "payment_status", "paid")
+                payment_status=getattr(c, "payment_status", "unpaid")
             )
         )
 
@@ -511,8 +566,11 @@ def create_ad_campaign(
 
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(days=payload.duration_days)
-    pay_ref = payload.payment_ref or f"QRIS-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    # Server-generated official invoice reference; client-supplied payment_ref is NEVER trusted as proof
+    invoice_ref = f"INV-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
+    # New campaigns start strictly in pending_payment and unpaid state.
+    # Active & paid status can only be granted by official payment provider verification.
     campaign = AdCampaign(
         store_id=store.id,
         owner_user_id=user_id,
@@ -521,9 +579,9 @@ def create_ad_campaign(
         duration_days=payload.duration_days,
         price_paid=pkg["price"],
         payment_method=payload.payment_method or "QRIS",
-        payment_ref=pay_ref,
-        payment_status="paid",
-        status="active",
+        payment_ref=invoice_ref,
+        payment_status="unpaid",
+        status="pending_payment",
         start_at=now,
         expires_at=expires_at
     )
@@ -545,9 +603,103 @@ def create_ad_campaign(
         distance_km=0.0,
         expires_at=campaign.expires_at.isoformat(),
         days_left=campaign.duration_days,
+        status=campaign.status,
         payment_method=campaign.payment_method,
         payment_ref=campaign.payment_ref,
         payment_status=campaign.payment_status
+    )
+
+
+@router.get("/campaigns/{campaign_id}", response_model=HomeBannerItem, status_code=status.HTTP_200_OK)
+def get_campaign_detail(
+    campaign_id: str,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mengambil detail satu kampanye iklan. Hanya dapat diakses oleh pemilik toko yang memiliki kampanye tersebut.
+    """
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kampanye iklan tidak ditemukan."
+        )
+
+    if str(campaign.owner_user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Anda tidak memiliki izin untuk mengakses kampanye toko ini."
+        )
+
+    store = db.query(Store).filter(Store.id == campaign.store_id).first()
+    now = datetime.now(timezone.utc)
+    exp_utc = _ensure_utc(campaign.expires_at)
+    delta = exp_utc - now
+    days_left = max(0, delta.days + (1 if delta.seconds > 0 else 0)) if exp_utc > now else 0
+
+    return HomeBannerItem(
+        id=str(campaign.id),
+        store_id=str(campaign.store_id),
+        store_nama=store.nama if store else "Toko",
+        store_alamat=store.alamat if store else None,
+        store_lat=store.lat if store else None,
+        store_lng=store.lng if store else None,
+        title=campaign.title,
+        banner_url=campaign.banner_url,
+        duration_days=campaign.duration_days,
+        price_paid=campaign.price_paid,
+        distance_km=0.0,
+        expires_at=campaign.expires_at.isoformat(),
+        days_left=days_left,
+        status=campaign.status,
+        payment_method=getattr(campaign, "payment_method", "QRIS"),
+        payment_ref=getattr(campaign, "payment_ref", None),
+        payment_status=getattr(campaign, "payment_status", "unpaid")
+    )
+
+
+@router.post("/campaigns/{campaign_id}/pay", status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+def initiate_campaign_payment(
+    campaign_id: str,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Memulai checkout pembayaran kampanye via payment gateway resmi.
+    Mengembalikan 503 Service Unavailable jika gateway pembayaran belum dikonfigurasi.
+    """
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kampanye iklan tidak ditemukan."
+        )
+
+    if str(campaign.owner_user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Anda tidak memiliki izin untuk membayar kampanye toko ini."
+        )
+
+    if campaign.payment_status == "paid":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Kampanye iklan ini sudah lunas."
+        )
+
+    xendit_key = os.getenv("XENDIT_SECRET_KEY")
+    if not xendit_key or not xendit_key.strip():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Payment gateway Xendit belum dikonfigurasi. Transaksi belum dapat diproses."
+        )
+
+    # Fail-closed: Ketersediaan API key TIDAK BOLEH mengaktifkan kampanye secara prematur.
+    # Selama integrasi API Xendit Sandbox belum aktif, tolak dengan HTTP 503.
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Integrasi API Xendit Sandbox belum selesai. Transaksi pembayaran belum dapat diproses."
     )
 
 
@@ -597,6 +749,8 @@ def _ensure_seed_campaigns(db: Session):
             duration_days=ad_data["duration"],
             price_paid=ad_data["price"],
             status="active",
+            payment_status="demo",
+            payment_method="DEMO",
             start_at=now,
             expires_at=expires
         )
