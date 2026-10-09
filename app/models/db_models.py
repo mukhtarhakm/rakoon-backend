@@ -58,7 +58,7 @@ class PriceEntry(Base):
     
     id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     product_id = Column(Uuid(as_uuid=False), ForeignKey("products.id"), nullable=False, index=True)
-    store_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
+    store_id = Column(Uuid(as_uuid=False), ForeignKey("stores.id"), nullable=False, index=True)
     harga = Column(Integer, nullable=False)
     sumber_user_id = Column(Uuid(as_uuid=False), nullable=False)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.db_models import User
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 logger = logging.getLogger("rakoon_backend")
 

@@ -16,7 +16,7 @@ logger = logging.getLogger("rakoon_backend.seed")
 
 # Load environment variables
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-load_dotenv(dotenv_path=env_path, override=True)
+load_dotenv(dotenv_path=env_path, override=False)
 
 # Solo area stores datasets (coordinates around -7.56, 110.82)
 SOLO_STORES = [

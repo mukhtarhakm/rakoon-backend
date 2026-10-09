@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rakoon_backend")
 
 # Load environment variables
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 # ======================================================================================
 # SUPABASE CLIENT SETUP (For transition and legacy support if needed)

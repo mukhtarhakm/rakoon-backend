@@ -7,7 +7,7 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# Load .env environment variables
+# Load .env environment variables without overriding explicitly set variables
 load_dotenv(override=False)
 
 # this is the Alembic Config object, which provides
@@ -27,9 +27,7 @@ if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
-
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
@@ -37,20 +35,12 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 from app.database import Base
 from app.models import db_models  # Import to register models in metadata
+from app.config_security import validate_migration_target
+
 target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
+    """Run migrations in 'offline' mode."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -64,12 +54,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
+    """Run migrations in 'online' mode."""
+    target_url = config.get_main_option("sqlalchemy.url") or db_url
+    validate_migration_target(target_url)
 
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
     # Override connectable configuration to use custom pool options if needed
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
