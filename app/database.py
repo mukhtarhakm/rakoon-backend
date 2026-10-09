@@ -127,16 +127,21 @@ else:
 # ======================================================================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Fallback to local SQLite if DATABASE_URL is not set in .env
-if not DATABASE_URL:
-    # default path to rakoon.db in the backend folder
-    DATABASE_URL = "sqlite:///./rakoon.db"
-    logger.info(f"DATABASE_URL not found in .env. Falling back to local SQLite: {DATABASE_URL}")
-else:
-    # Ensure correct format for SQLAlchemy for postgresql://
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    logger.info("DATABASE_URL found. Initializing database engine.")
+if not DATABASE_URL or not DATABASE_URL.strip():
+    raise RuntimeError(
+        "DATABASE_URL is required. Configure a PostgreSQL/Supabase connection string "
+        "before starting the backend."
+    )
+
+DATABASE_URL = DATABASE_URL.strip()
+
+# Normalize the legacy PostgreSQL scheme accepted by some providers.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# The application database is configured explicitly. SQLite remains available only
+# when a test supplies an explicit in-memory/disposable DATABASE_URL.
+logger.info("Database URL configured; initializing database engine.")
 
 # Set up engine arguments (connect_args is only for sqlite)
 engine_args = {}

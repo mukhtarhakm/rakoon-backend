@@ -16,11 +16,15 @@ config = context.config
 
 # Dynamically set the sqlalchemy.url from the env variable
 db_url = os.getenv("DATABASE_URL")
-if not db_url:
-    db_url = "sqlite:///./rakoon.db"
-else:
-    if db_url.startswith("postgres://"):
-        db_url = db_url.replace("postgres://", "postgresql://", 1)
+if not db_url or not db_url.strip():
+    raise RuntimeError(
+        "DATABASE_URL is required to run Alembic. Configure a PostgreSQL/Supabase "
+        "connection string before running database migrations."
+    )
+
+db_url = db_url.strip()
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
 config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 
