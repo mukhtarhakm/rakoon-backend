@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field
 
 from app.database import get_db, supabase
@@ -666,7 +667,7 @@ def get_campaign_detail(
     """
     Mengambil detail satu kampanye iklan. Hanya dapat diakses oleh pemilik toko yang memiliki kampanye tersebut.
     """
-    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).with_for_update().first()
     if not campaign:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -716,7 +717,7 @@ def initiate_campaign_payment(
     Memulai checkout pembayaran kampanye via payment gateway resmi Xendit Sandbox.
     Membuat invoice Xendit dan mengembalikan URL checkout resmi.
     """
-    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).with_for_update().first()
     if not campaign:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -826,6 +827,34 @@ def initiate_campaign_payment(
     try:
         db.commit()
         db.refresh(tx)
+    except IntegrityError:
+        db.rollback()
+        logger.info(f"Concurrent checkout race condition detected for {external_id}, reconciling...")
+        existing_tx = (
+            db.query(PaymentTransaction)
+            .filter(
+                PaymentTransaction.campaign_id == campaign.id,
+                PaymentTransaction.status == "PENDING",
+                PaymentTransaction.invoice_url.isnot(None),
+            )
+            .order_by(PaymentTransaction.created_at.desc())
+            .first()
+        )
+        if existing_tx:
+            return InitiatePaymentResponse(
+                campaign_id=str(campaign.id),
+                external_id=existing_tx.external_id,
+                xendit_invoice_id=existing_tx.xendit_invoice_id,
+                amount=int(existing_tx.amount),
+                currency=existing_tx.currency,
+                status=existing_tx.status,
+                invoice_url=existing_tx.invoice_url,
+                expiry_date=None,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Transaksi sedang diproses oleh permintaan lain. Silakan periksa status pembayaran."
+        )
     except Exception as e:
         db.rollback()
         logger.error(f"Database error saving payment transaction: {e}")
@@ -886,6 +915,7 @@ async def xendit_webhook(
     tx = (
         db.query(PaymentTransaction)
         .filter(PaymentTransaction.external_id == external_id)
+        .with_for_update()
         .first()
     )
     if not tx:
@@ -913,7 +943,7 @@ async def xendit_webhook(
         if tx.status == "PAID":
             return {"status": "already_processed", "message": "Transaction already verified and paid"}
 
-        campaign = db.query(AdCampaign).filter(AdCampaign.id == tx.campaign_id).first()
+        campaign = db.query(AdCampaign).filter(AdCampaign.id == tx.campaign_id).with_for_update().first()
         if not campaign:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -988,7 +1018,7 @@ def get_campaign_payment_status(
     Mengambil status pembayaran dan transaksi kampanye iklan terkini.
     Hanya dapat diakses oleh pemilik kampanye yang sah.
     """
-    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).with_for_update().first()
     if not campaign:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

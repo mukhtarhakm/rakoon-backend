@@ -1,7 +1,7 @@
-import os
+﻿import os
 import hmac
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import httpx
 
 logger = logging.getLogger("rakoon_backend.xendit")
@@ -72,6 +72,38 @@ def verify_webhook_token(token: Optional[str]) -> bool:
     return hmac.compare_digest(token, expected_token)
 
 
+def get_invoice_by_external_id(
+    external_id: str,
+    client: Optional[httpx.Client] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Queries Xendit API for an existing invoice matching external_id.
+    Used for safe reconciliation when concurrent requests or network timeouts occur.
+    """
+    config = get_xendit_config()
+    secret_key = config["secret_key"]
+    url = f"{XENDIT_INVOICE_API_URL}?external_id={external_id}"
+    headers = {"Accept": "application/json"}
+
+    try:
+        if client is not None:
+            response = client.get(url, headers=headers, auth=(secret_key, ""), timeout=10.0)
+        else:
+            with httpx.Client(timeout=10.0) as http_client:
+                response = http_client.get(url, headers=headers, auth=(secret_key, ""))
+
+        if response.status_code == 200:
+            invoices = response.json()
+            if isinstance(invoices, list) and invoices:
+                # Return the active/pending invoice or the most recent one
+                pending = [inv for inv in invoices if (inv.get("status") or "").upper() in ("PENDING", "PAID", "SETTLED")]
+                return pending[0] if pending else invoices[0]
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to reconcile existing invoice from Xendit: {type(e).__name__}")
+        return None
+
+
 def create_invoice(
     external_id: str,
     amount: int,
@@ -82,6 +114,7 @@ def create_invoice(
     """
     Creates a Xendit Sandbox invoice.
     Uses HTTP Basic Auth with secret_key as username and empty password.
+    Includes Idempotency-Key and reconciles duplicate invoice responses automatically.
     """
     config = get_xendit_config()
     secret_key = config["secret_key"]
@@ -102,6 +135,7 @@ def create_invoice(
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "Idempotency-Key": external_id,
     }
 
     try:
@@ -123,6 +157,22 @@ def create_invoice(
                 )
 
         if response.status_code not in (200, 201):
+            # Check for duplicate invoice response from Xendit
+            err_data = {}
+            try:
+                err_data = response.json()
+            except Exception:
+                pass
+
+            err_code = str(err_data.get("error_code", "")).upper()
+            err_msg = str(err_data.get("message", "")).upper()
+
+            if "DUPLICATE" in err_code or "ALREADY EXISTS" in err_msg or "DUPLICATE" in err_msg:
+                logger.info(f"Duplicate invoice detected on Xendit for {external_id}, reconciling...")
+                reconciled = get_invoice_by_external_id(external_id, client=client)
+                if reconciled and "id" in reconciled and "invoice_url" in reconciled:
+                    return reconciled
+
             logger.error(f"Xendit API returned status {response.status_code}")
             raise XenditAPIError(f"Xendit API returned status code {response.status_code}")
 

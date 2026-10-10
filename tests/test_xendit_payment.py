@@ -662,5 +662,100 @@ class TestXenditPaymentIntegration(unittest.TestCase):
             self.assertIn("Database error", pay_res.json()["detail"])
 
 
+
+    # 23. Concurrent checkout race condition: IntegrityError triggers safe reconciliation
+    @patch("app.services.xendit_service.create_invoice")
+    def test_23_concurrent_checkout_reconciliation_on_integrity_error(self, mock_create_inv):
+        campaign_data = self._create_pending_campaign()
+        campaign_id = campaign_data["id"]
+        ext_id = campaign_data["payment_ref"]
+
+        mock_create_inv.return_value = {
+            "id": "xinv_concurrent_race",
+            "external_id": ext_id,
+            "status": "PENDING",
+            "invoice_url": "https://checkout.xendit.co/inv-race",
+            "amount": 15000,
+        }
+
+        from sqlalchemy.exc import IntegrityError
+        original_commit = self.db.commit
+        has_raised = [False]
+
+        def simulate_competing_insert_on_commit():
+            if not has_raised[0]:
+                has_raised[0] = True
+                # Simulate competing worker in a separate session successfully committing first
+                competing_session = TestingSessionLocal()
+                try:
+                    competing_tx = PaymentTransaction(
+                        campaign_id=campaign_data["id"],
+                        owner_user_id=TEST_USER_ID,
+                        provider="xendit",
+                        environment="sandbox",
+                        external_id=ext_id,
+                        xendit_invoice_id="xinv_concurrent_race",
+                        amount=15000,
+                        currency="IDR",
+                        status="PENDING",
+                        invoice_url="https://checkout.xendit.co/inv-race",
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                    competing_session.add(competing_tx)
+                    competing_session.commit()
+                finally:
+                    competing_session.close()
+
+                # Now the current worker's commit fails with IntegrityError (duplicate external_id)
+                raise IntegrityError("UNIQUE constraint failed: payment_transactions.external_id", params=[], orig=Exception())
+            else:
+                original_commit()
+
+        with patch.object(self.db, "commit", side_effect=simulate_competing_insert_on_commit):
+            app.dependency_overrides[get_db] = lambda: self.db
+            pay_res = self.client.post(f"/ads/campaigns/{campaign_id}/pay")
+            # Must reconcile and return 200 with checkout URL, NOT 500 error!
+            self.assertEqual(pay_res.status_code, 200)
+            data = pay_res.json()
+            self.assertEqual(data["external_id"], ext_id)
+            self.assertEqual(data["invoice_url"], "https://checkout.xendit.co/inv-race")
+            self.assertEqual(data["status"], "PENDING")
+
+    # 24. Xendit API duplicate invoice response reconciles automatically
+    @patch("app.services.xendit_service.get_invoice_by_external_id")
+    def test_24_xendit_duplicate_invoice_reconciliation(self, mock_get_by_ext):
+        import httpx
+        from app.services import xendit_service
+
+        mock_get_by_ext.return_value = {
+            "id": "xinv_reconciled_999",
+            "external_id": "INV-20261010-RECON",
+            "status": "PENDING",
+            "amount": 15000,
+            "invoice_url": "https://checkout.xendit.co/inv-reconciled",
+        }
+
+        # Simulate client receiving duplicate error from Xendit
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.json.return_value = {
+            "error_code": "DUPLICATE_INVOICE_ERROR",
+            "message": "An invoice with the same external id already exists"
+        }
+        mock_client.post.return_value = mock_resp
+
+        result = xendit_service.create_invoice(
+            external_id="INV-20261010-RECON",
+            amount=15000,
+            description="Test Promo",
+            client=mock_client
+        )
+        self.assertEqual(result["id"], "xinv_reconciled_999")
+        self.assertEqual(result["invoice_url"], "https://checkout.xendit.co/inv-reconciled")
+        mock_get_by_ext.assert_called_once_with("INV-20261010-RECON", client=mock_client)
+
+
 if __name__ == "__main__":
     unittest.main()
