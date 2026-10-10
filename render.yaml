@@ -6,10 +6,13 @@ services:
     plan: free
     rootDir: .
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    # Menjalankan Alembic migration sebelum Uvicorn mulai melayani request.
+    # Jika migration gagal, proses berhenti dengan exit code gagal dan Uvicorn tidak dijalankan.
+    # Catatan: Jika instance di-upgrade ke tier berbayar (Starter+), command ini juga dapat menggunakan preDeployCommand.
+    startCommand: python -m alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: SUPABASE_URL
-        sync: false        # Akan diisi manual di Render Dashboard
+        sync: false        # Diisi manual di Render Dashboard
       - key: SUPABASE_SERVICE_KEY
         sync: false
       - key: DATABASE_URL
@@ -22,4 +25,17 @@ services:
         value: https://api.openai.com/v1
       - key: ADMIN_EMAILS
         sync: false        # Diisi manual di Render Dashboard
+      # Konfigurasi pengaman migrasi database remote (Alembic guard)
+      - key: ALLOW_REMOTE_MIGRATION
+        sync: false        # Set 'true' di Render Dashboard saat ingin mengeksekusi migrasi remote
+      - key: RAKOON_ENV
+        value: development # development / staging / production
+      - key: EXPECTED_DATABASE_HOST
+        sync: false        # Hostname database remote (misal: aws-0-ap-southeast-1.pooler.supabase.com)
+      - key: EXPECTED_DATABASE_PORT
+        value: "6543"      # 6543 (transaction pooler) atau 5432 (direct/session)
+      - key: EXPECTED_DATABASE_NAME
+        value: postgres
+      - key: EXPECTED_SUPABASE_PROJECT_REF
+        sync: false        # Project reference Supabase (misal: xxxxxxxxxxxxxxxxxxxx)
     healthCheckPath: /health

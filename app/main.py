@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import price, scan, stores, products, recommendation, budget_shopping, auth, ads
+from app.routers import price, scan, stores, products, recommendation, budget_shopping, auth, ads, health
 
 app = FastAPI(
     title="Rakoon Backend",
@@ -35,17 +35,13 @@ app.include_router(recommendation.router, prefix="/recommendation", tags=["recom
 app.include_router(budget_shopping.router, prefix="/budget-shopping", tags=["budget-shopping"])
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(ads.router, prefix="/ads", tags=["ads"])
+app.include_router(health.router, tags=["health"])
 
-async def health_check():
-    """
-    Health check endpoint untuk memastikan server berjalan dengan baik.
-    Mendukung GET dan HEAD (untuk monitoring tools).
-    """
+@app.api_route("/", methods=["GET", "HEAD"])
+def root():
+    """Root endpoint returning application liveness info."""
     return {
         "status": "ok",
         "app": "Rakoon Backend",
-        "version": "1.0.0"
+        "version": "1.0.0",
     }
-
-app.add_api_route("/", health_check, methods=["GET", "HEAD"])
-app.add_api_route("/health", health_check, methods=["GET", "HEAD"])

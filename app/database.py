@@ -2,7 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Configure logging
@@ -159,3 +159,19 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def check_database_readiness(timeout_seconds: float = 3.0) -> bool:
+    """
+    Lightweight health check probe that verifies connectivity to the database
+    by executing a fast 'SELECT 1' query with a strict timeout.
+    Returns True if the database responds, False otherwise.
+    Safe: does not leak credentials or connection info upon failure.
+    """
+    try:
+        with engine.connect() as connection:
+            connection.execution_options(timeout=timeout_seconds).execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        logger.warning(f"Database readiness check failed: {type(e).__name__}")
+        return False
+
