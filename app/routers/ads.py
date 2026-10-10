@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.database import get_db, supabase
 from app.dependencies import get_current_user, get_current_admin_user
-from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction
+from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, User
 from app.services import xendit_service
 from app.routers.stores import haversine_distance
 from app.routers.products import detect_image_type
@@ -122,10 +122,20 @@ class VerifyStoreClaimRequest(BaseModel):
     store_id: str = Field(..., description="ID toko yang diklaim")
 
 
+class RejectStoreClaimRequest(BaseModel):
+    user_id: str = Field(..., description="ID pengguna yang mengajukan klaim")
+    store_id: str = Field(..., description="ID toko yang diklaim")
+    reason: Optional[str] = Field(None, description="Alasan penolakan klaim opsional")
+
+
 class PendingStoreClaimItem(BaseModel):
     user_id: str
     store_id: str
     store_nama: str
+    store_alamat: Optional[str] = None
+    user_nama: Optional[str] = None
+    user_email: Optional[str] = None
+    status: str = "pending"
     created_at: str
 
 
@@ -386,7 +396,7 @@ def get_my_store(
 
     return MyStoreResponse(
         is_claimed=owner.status == "verified" and owner.verified_at is not None,
-        claim_status="verified" if owner.status == "verified" and owner.verified_at is not None else "pending",
+        claim_status="rejected" if owner.status == "rejected" else ("verified" if owner.status == "verified" and owner.verified_at is not None else "pending"),
         store_id=str(store.id),
         store_nama=store.nama,
         store_alamat=store.alamat,
@@ -459,22 +469,57 @@ def get_pending_store_claims(
     db: Session = Depends(get_db)
 ):
     """Daftar klaim yang harus diperiksa oleh admin."""
+    # ponytail: pending filter excludes rejected/verified; add pagination when claims exceed 100/day
     rows = (
         db.query(StoreOwner, Store)
         .join(Store, StoreOwner.store_id == Store.id)
-        .filter((StoreOwner.status != "verified") | (StoreOwner.verified_at.is_(None)))
+        .filter(StoreOwner.status != "rejected", (StoreOwner.status != "verified") | (StoreOwner.verified_at.is_(None)))
         .order_by(StoreOwner.created_at.asc())
         .all()
     )
+    user_ids = [str(owner.user_id) for owner, _ in rows]
+    users_map = {str(u.id): u for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
     return [
         PendingStoreClaimItem(
             user_id=str(owner.user_id),
             store_id=str(store.id),
             store_nama=store.nama,
-            created_at=owner.created_at.isoformat(),
+            store_alamat=store.alamat,
+            user_nama=users_map[str(owner.user_id)].nama if str(owner.user_id) in users_map else None,
+            user_email=users_map[str(owner.user_id)].email if str(owner.user_id) in users_map else None,
+            status=owner.status,
+            created_at=owner.created_at.isoformat() if owner.created_at else "",
         )
         for owner, store in rows
     ]
+
+
+@router.post("/reject-claim", response_model=MyStoreResponse, status_code=status.HTTP_200_OK)
+def reject_store_claim(
+    payload: RejectStoreClaimRequest,
+    admin_user: dict = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Tolak klaim toko oleh admin."""
+    # ponytail: sets status to rejected without audit table; add audit log table when SLA tracking is needed
+    owner = (
+        db.query(StoreOwner)
+        .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
+        .first()
+    )
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
+
+    if owner.status == "verified" and owner.verified_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Klaim toko yang sudah terverifikasi tidak dapat ditolak."
+        )
+
+    owner.status = "rejected"
+    owner.verified_at = None
+    db.commit()
+    return get_my_store(user_id=payload.user_id, db=db)
 
 
 @router.post("/verify-claim", response_model=MyStoreResponse, status_code=status.HTTP_200_OK)

@@ -119,6 +119,61 @@ class TestAdsModule(unittest.TestCase):
         other_claim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
         self.assertEqual(other_claim_res.status_code, 409)
 
+    def test_admin_claim_approval_rejection_and_authorization(self):
+        """Verify admin claim list, approval, rejection, and strict authorization guards."""
+        # 1. User claims store
+        claim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.assertEqual(claim_res.status_code, 200)
+
+        # 2. Non-admin (or unauthenticated) forbidden from admin claim endpoints
+        app.dependency_overrides.pop(get_current_admin_user, None)
+        self.assertEqual(self.client.get("/ads/pending-claims").status_code, 403)
+        self.assertEqual(self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)}).status_code, 403)
+        self.assertEqual(self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)}).status_code, 403)
+
+        # 3. Admin sees pending claim with store details
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin-1", "role": "admin"}
+        pending_res = self.client.get("/ads/pending-claims")
+        self.assertEqual(pending_res.status_code, 200)
+        claims = pending_res.json()
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]["user_id"], TEST_USER_ID)
+        self.assertEqual(claims[0]["store_id"], str(self.store.id))
+        self.assertEqual(claims[0]["store_nama"], self.store.nama)
+
+        # 4. Reject non-existent claim returns 404
+        self.assertEqual(self.client.post("/ads/reject-claim", json={"user_id": "non-existent", "store_id": str(self.store.id)}).status_code, 404)
+        self.assertEqual(self.client.post("/ads/verify-claim", json={"user_id": "non-existent", "store_id": str(self.store.id)}).status_code, 404)
+
+        # 5. Admin rejects claim
+        reject_res = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id), "reason": "Dokumen tidak lengkap"})
+        self.assertEqual(reject_res.status_code, 200)
+        self.assertFalse(reject_res.json()["is_claimed"])
+        self.assertEqual(reject_res.json()["claim_status"], "rejected")
+
+        # 6. Rejected claim is removed from pending claims
+        self.assertEqual(self.client.get("/ads/pending-claims").json(), [])
+
+        # 7. Merchant checks status: reflects rejected
+        my_store = self.client.get("/ads/my-store")
+        self.assertEqual(my_store.status_code, 200)
+        self.assertEqual(my_store.json()["claim_status"], "rejected")
+        self.assertFalse(my_store.json()["is_claimed"])
+
+        # 8. Merchant can re-claim and admin approves it
+        reclaim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.assertEqual(reclaim_res.status_code, 200)
+        self.assertEqual(len(self.client.get("/ads/pending-claims").json()), 1)
+
+        verify_res = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(verify_res.status_code, 200)
+        self.assertTrue(verify_res.json()["is_claimed"])
+        self.assertEqual(verify_res.json()["claim_status"], "verified")
+
+        # 9. Already verified claim cannot be rejected
+        reject_verified = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(reject_verified.status_code, 400)
+
     def test_create_campaign_starts_as_pending_payment_and_unpaid(self):
         """Campaign created without verified payment must start strictly as pending_payment and unpaid."""
         # Claim and verify store
