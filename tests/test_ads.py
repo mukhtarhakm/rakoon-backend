@@ -151,6 +151,12 @@ class TestAdsModule(unittest.TestCase):
         self.assertFalse(reject_res.json()["is_claimed"])
         self.assertEqual(reject_res.json()["claim_status"], "rejected")
 
+        # 5a. Rejected claim cannot be verified directly or rejected again
+        verify_rejected = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(verify_rejected.status_code, 400)
+        reject_again = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(reject_again.status_code, 400)
+
         # 6. Rejected claim is removed from pending claims
         self.assertEqual(self.client.get("/ads/pending-claims").json(), [])
 
@@ -170,9 +176,44 @@ class TestAdsModule(unittest.TestCase):
         self.assertTrue(verify_res.json()["is_claimed"])
         self.assertEqual(verify_res.json()["claim_status"], "verified")
 
-        # 9. Already verified claim cannot be rejected
+        # 9. Already verified claim cannot be rejected or re-verified
         reject_verified = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
         self.assertEqual(reject_verified.status_code, 400)
+        verify_again = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(verify_again.status_code, 400)
+
+    def test_pending_claims_visibility_of_conflict_with_verified_owner(self):
+        """When a store is already verified to one merchant, other pending claims for it show has_verified_owner=True."""
+        # 1. First user claims and is verified
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.assertEqual(self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)}).status_code, 200)
+
+        # 2. Concurrently existing pending claim from second user for the same store
+        other_claim = StoreOwner(
+            user_id=OTHER_USER_ID,
+            store_id=self.store.id,
+            status="pending",
+        )
+        self.db.add(other_claim)
+        self.db.commit()
+
+        # 3. Admin gets pending claims: other_claim has has_verified_owner=True
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin"}
+        pending_res = self.client.get("/ads/pending-claims")
+        self.assertEqual(pending_res.status_code, 200)
+        claims = pending_res.json()
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]["user_id"], OTHER_USER_ID)
+        self.assertTrue(claims[0]["has_verified_owner"])
+
+        # 4. Attempting to verify other_claim fails with 409 Conflict
+        verify_conflict = self.client.post("/ads/verify-claim", json={"user_id": OTHER_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(verify_conflict.status_code, 409)
+
+        # 5. Admin can reject other_claim cleanly
+        reject_res = self.client.post("/ads/reject-claim", json={"user_id": OTHER_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(reject_res.status_code, 200)
+        self.assertEqual(self.client.get("/ads/pending-claims").json(), [])
 
     def test_create_campaign_starts_as_pending_payment_and_unpaid(self):
         """Campaign created without verified payment must start strictly as pending_payment and unpaid."""

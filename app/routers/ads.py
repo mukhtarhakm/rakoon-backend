@@ -137,6 +137,7 @@ class PendingStoreClaimItem(BaseModel):
     user_email: Optional[str] = None
     status: str = "pending"
     created_at: str
+    has_verified_owner: bool = False
 
 
 class MyStoreResponse(BaseModel):
@@ -478,7 +479,22 @@ def get_pending_store_claims(
         .all()
     )
     user_ids = [str(owner.user_id) for owner, _ in rows]
+    store_ids = [store.id for _, store in rows]
     users_map = {str(u.id): u for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
+
+    verified_store_ids = set()
+    if store_ids:
+        verified_owners = (
+            db.query(StoreOwner.store_id)
+            .filter(
+                StoreOwner.store_id.in_(store_ids),
+                StoreOwner.status == "verified",
+                StoreOwner.verified_at.isnot(None),
+            )
+            .all()
+        )
+        verified_store_ids = {str(so[0]) for so in verified_owners}
+
     return [
         PendingStoreClaimItem(
             user_id=str(owner.user_id),
@@ -489,6 +505,7 @@ def get_pending_store_claims(
             user_email=users_map[str(owner.user_id)].email if str(owner.user_id) in users_map else None,
             status=owner.status,
             created_at=owner.created_at.isoformat() if owner.created_at else "",
+            has_verified_owner=str(store.id) in verified_store_ids,
         )
         for owner, store in rows
     ]
@@ -516,6 +533,12 @@ def reject_store_claim(
             detail="Klaim toko yang sudah terverifikasi tidak dapat ditolak."
         )
 
+    if owner.status == "rejected":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Klaim toko sudah dalam status ditolak."
+        )
+
     owner.status = "rejected"
     owner.verified_at = None
     db.commit()
@@ -536,6 +559,18 @@ def verify_store_claim(
     )
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
+
+    if owner.status == "rejected":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Klaim toko yang sudah ditolak tidak dapat langsung disetujui. Pengguna harus mengajukan klaim ulang terlebih dahulu."
+        )
+
+    if owner.status == "verified" and owner.verified_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Klaim toko sudah dalam status terverifikasi."
+        )
 
     # Serialize approvals for the same store on PostgreSQL before checking ownership.
     db.query(Store).filter(Store.id == owner.store_id).with_for_update().first()
