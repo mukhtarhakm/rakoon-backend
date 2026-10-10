@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid, Index
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid, Index, Numeric
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -105,4 +105,28 @@ class AdCampaign(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     store = relationship("Store")
+    transactions = relationship("PaymentTransaction", back_populates="campaign", cascade="all, delete-orphan")
 
+
+class PaymentTransaction(Base):
+    __tablename__ = "payment_transactions"
+    __table_args__ = (
+        Index("ix_payment_transactions_campaign_status", "campaign_id", "status"),
+    )
+
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    campaign_id = Column(Uuid(as_uuid=False), ForeignKey("ad_campaigns.id"), nullable=False, index=True)
+    owner_user_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
+    provider = Column(String, default="xendit", nullable=False)
+    environment = Column(String, default="sandbox", nullable=False)
+    external_id = Column(String, unique=True, index=True, nullable=False)
+    xendit_invoice_id = Column(String, nullable=True, index=True)
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String, default="IDR", nullable=False)
+    status = Column(String, default="PENDING", nullable=False, index=True)
+    invoice_url = Column(String, nullable=True)
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    campaign = relationship("AdCampaign", back_populates="transactions")

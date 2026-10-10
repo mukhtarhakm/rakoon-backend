@@ -6,13 +6,14 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.database import get_db, supabase
 from app.dependencies import get_current_user, get_current_admin_user
-from app.models.db_models import Store, StoreOwner, AdCampaign
+from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction
+from app.services import xendit_service
 from app.routers.stores import haversine_distance
 from app.routers.products import detect_image_type
 
@@ -67,6 +68,31 @@ class HomeBannerItem(BaseModel):
 
     model_config = {"from_attributes": True, "extra": "ignore"}
 
+
+
+class InitiatePaymentResponse(BaseModel):
+    campaign_id: str
+    external_id: str
+    xendit_invoice_id: Optional[str] = None
+    amount: int
+    currency: str = "IDR"
+    status: str
+    invoice_url: Optional[str] = None
+    expiry_date: Optional[str] = None
+
+
+class PaymentStatusResponse(BaseModel):
+    campaign_id: str
+    campaign_status: str
+    payment_status: str
+    transaction_status: Optional[str] = None
+    external_id: Optional[str] = None
+    xendit_invoice_id: Optional[str] = None
+    invoice_url: Optional[str] = None
+    amount: Optional[int] = None
+    currency: Optional[str] = "IDR"
+    paid_at: Optional[str] = None
+    expires_at: Optional[str] = None
 
 class PricingPackageItem(BaseModel):
     duration_days: int
@@ -129,18 +155,39 @@ def _ensure_utc(dt: Optional[datetime]) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def _has_verified_provider_proof(campaign: AdCampaign) -> bool:
+def _parse_iso(val: Optional[str]) -> Optional[datetime]:
+    if not val:
+        return None
+    try:
+        s = val.replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _has_verified_provider_proof(campaign: AdCampaign, db: Optional[Session] = None) -> bool:
     """
     Memeriksa apakah kampanye memiliki bukti pembayaran yang benar-benar terverifikasi
-    dari payment gateway resmi (Xendit).
-
-    PERINGATAN KEAMANAN:
-    Awalan string (seperti 'XND-' atau 'XENDIT-') BUKAN bukti pembayaran yang sah.
-    Selama integrasi payment gateway Xendit Sandbox belum selesai, belum ada mekanisme
-    verifikasi bukti pembayaran server-side yang dapat dipercaya.
-    Oleh karena itu, fungsi ini mengembalikan False secara fail-closed untuk mencegah
-    kampanye komersial ditayangkan tanpa bukti transaksi nyata dari provider.
+    dari payment gateway resmi (Xendit) yang tersimpan di PaymentTransaction berstatus 'PAID'.
     """
+    if campaign.payment_status != "paid" or campaign.status != "active":
+        return False
+
+    if hasattr(campaign, "transactions") and campaign.transactions:
+        return any(tx.status == "PAID" and tx.provider == "xendit" for tx in campaign.transactions)
+
+    if db is not None:
+        return (
+            db.query(PaymentTransaction)
+            .filter(
+                PaymentTransaction.campaign_id == campaign.id,
+                PaymentTransaction.status == "PAID",
+                PaymentTransaction.provider == "xendit",
+            )
+            .first()
+            is not None
+        )
+
     return False
 
 
@@ -659,15 +706,15 @@ def get_campaign_detail(
     )
 
 
-@router.post("/campaigns/{campaign_id}/pay", status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+@router.post("/campaigns/{campaign_id}/pay", response_model=InitiatePaymentResponse, status_code=status.HTTP_200_OK)
 def initiate_campaign_payment(
     campaign_id: str,
     user_id: str = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Memulai checkout pembayaran kampanye via payment gateway resmi.
-    Mengembalikan 503 Service Unavailable jika gateway pembayaran belum dikonfigurasi.
+    Memulai checkout pembayaran kampanye via payment gateway resmi Xendit Sandbox.
+    Membuat invoice Xendit dan mengembalikan URL checkout resmi.
     """
     campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
     if not campaign:
@@ -682,24 +729,297 @@ def initiate_campaign_payment(
             detail="Anda tidak memiliki izin untuk membayar kampanye toko ini."
         )
 
-    if campaign.payment_status == "paid":
+    owner = (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.user_id == user_id,
+            StoreOwner.store_id == campaign.store_id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+        )
+        .first()
+    )
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Hanya pemilik toko terverifikasi yang dapat membayar kampanye iklan."
+        )
+
+    if campaign.payment_status == "paid" or campaign.status == "active":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Kampanye iklan ini sudah lunas."
+            detail="Kampanye iklan ini sudah lunas atau aktif."
         )
 
-    xendit_key = os.getenv("XENDIT_SECRET_KEY")
-    if not xendit_key or not xendit_key.strip():
+    now = datetime.now(timezone.utc)
+    if _ensure_utc(campaign.expires_at) < now and campaign.status == "expired":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Kampanye iklan ini sudah kedaluwarsa."
+        )
+
+    try:
+        config = xendit_service.get_xendit_config()
+    except xendit_service.XenditConfigError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Payment gateway Xendit belum dikonfigurasi. Transaksi belum dapat diproses."
+            detail=f"Payment gateway Xendit belum dikonfigurasi: {e}"
         )
 
-    # Fail-closed: Ketersediaan API key TIDAK BOLEH mengaktifkan kampanye secara prematur.
-    # Selama integrasi API Xendit Sandbox belum aktif, tolak dengan HTTP 503.
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Integrasi API Xendit Sandbox belum selesai. Transaksi pembayaran belum dapat diproses."
+    # Idempotensi: jika sudah ada transaksi PENDING dengan invoice_url yang valid, gunakan kembali
+    existing_tx = (
+        db.query(PaymentTransaction)
+        .filter(
+            PaymentTransaction.campaign_id == campaign.id,
+            PaymentTransaction.status == "PENDING",
+            PaymentTransaction.invoice_url.isnot(None),
+        )
+        .order_by(PaymentTransaction.created_at.desc())
+        .first()
+    )
+    if existing_tx:
+        return InitiatePaymentResponse(
+            campaign_id=str(campaign.id),
+            external_id=existing_tx.external_id,
+            xendit_invoice_id=existing_tx.xendit_invoice_id,
+            amount=int(existing_tx.amount),
+            currency=existing_tx.currency,
+            status=existing_tx.status,
+            invoice_url=existing_tx.invoice_url,
+            expiry_date=None,
+        )
+
+    external_id = campaign.payment_ref or f"INV-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    if not campaign.payment_ref:
+        campaign.payment_ref = external_id
+        db.commit()
+
+    description = f"Kampanye Iklan Rakoon: {campaign.title} ({campaign.duration_days} Hari)"
+    try:
+        xendit_resp = xendit_service.create_invoice(
+            external_id=external_id,
+            amount=campaign.price_paid,
+            description=description,
+        )
+    except xendit_service.XenditAPIError as e:
+        logger.error(f"Gagal memanggil Xendit invoice API: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gagal menghubungi gateway pembayaran Xendit. Silakan coba kembali."
+        )
+
+    tx = PaymentTransaction(
+        campaign_id=campaign.id,
+        owner_user_id=campaign.owner_user_id,
+        provider="xendit",
+        environment=config["environment"],
+        external_id=external_id,
+        xendit_invoice_id=xendit_resp.get("id"),
+        amount=campaign.price_paid,
+        currency="IDR",
+        status="PENDING",
+        invoice_url=xendit_resp.get("invoice_url"),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(tx)
+    try:
+        db.commit()
+        db.refresh(tx)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Database error saving payment transaction: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error saving payment transaction"
+        )
+
+    return InitiatePaymentResponse(
+        campaign_id=str(campaign.id),
+        external_id=tx.external_id,
+        xendit_invoice_id=tx.xendit_invoice_id,
+        amount=int(tx.amount),
+        currency=tx.currency,
+        status=tx.status,
+        invoice_url=tx.invoice_url,
+        expiry_date=xendit_resp.get("expiry_date"),
+    )
+
+
+@router.post("/webhook/xendit", status_code=status.HTTP_200_OK)
+async def xendit_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Menerima notifikasi webhook resmi dari Xendit untuk pembaruan status transaksi.
+    Hanya webhook dengan callback token yang sah dan transaksi yang cocok yang dapat memutasi status.
+    """
+    token = request.headers.get("x-callback-token")
+    if not xendit_service.verify_webhook_token(token):
+        logger.warning("Xendit webhook rejected: invalid or missing callback token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing callback token"
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload"
+        )
+
+    xendit_id = payload.get("id")
+    external_id = payload.get("external_id")
+    event_status = (payload.get("status") or "").upper()
+    paid_amount = payload.get("paid_amount") if payload.get("paid_amount") is not None else payload.get("amount")
+    currency = payload.get("currency", "IDR")
+
+    if not external_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing external_id in webhook payload"
+        )
+
+    tx = (
+        db.query(PaymentTransaction)
+        .filter(PaymentTransaction.external_id == external_id)
+        .first()
+    )
+    if not tx:
+        logger.warning(f"Webhook received for unknown external_id: {external_id}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transaction not found"
+        )
+
+    if currency and currency != tx.currency:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Currency mismatch"
+        )
+
+    if paid_amount is not None and abs(float(paid_amount) - float(tx.amount)) > 0.01:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Amount mismatch"
+        )
+
+    now = datetime.now(timezone.utc)
+    if event_status in ("PAID", "SETTLED"):
+        # Idempotensi: jika sudah PAID, kembalikan 200 tanpa mengulang aktivasi
+        if tx.status == "PAID":
+            return {"status": "already_processed", "message": "Transaction already verified and paid"}
+
+        campaign = db.query(AdCampaign).filter(AdCampaign.id == tx.campaign_id).first()
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Associated campaign not found"
+            )
+
+        tx.status = "PAID"
+        tx.paid_at = _parse_iso(payload.get("paid_at")) or now
+        tx.updated_at = now
+        if xendit_id:
+            tx.xendit_invoice_id = xendit_id
+
+        campaign.payment_status = "paid"
+        campaign.status = "active"
+        campaign.payment_ref = xendit_id or tx.external_id
+        campaign.start_at = now
+        campaign.expires_at = now + timedelta(days=campaign.duration_days)
+
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Database error committing webhook update: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Database error processing webhook"
+            )
+
+        logger.info(f"Campaign {campaign.id} successfully activated via Xendit webhook")
+        return {"status": "success", "message": "Payment verified and campaign activated"}
+
+    elif event_status == "EXPIRED":
+        if tx.status != "PAID":
+            tx.status = "EXPIRED"
+            tx.updated_at = now
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Database error committing webhook update: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Database error processing webhook"
+                )
+        return {"status": "success", "message": "Transaction marked as EXPIRED"}
+
+    elif event_status == "FAILED":
+        if tx.status != "PAID":
+            tx.status = "FAILED"
+            tx.updated_at = now
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Database error committing webhook update: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Database error processing webhook"
+                )
+        return {"status": "success", "message": "Transaction marked as FAILED"}
+
+    return {"status": "ignored", "message": f"Event status {event_status} ignored"}
+
+
+@router.get("/campaigns/{campaign_id}/payment-status", response_model=PaymentStatusResponse, status_code=status.HTTP_200_OK)
+def get_campaign_payment_status(
+    campaign_id: str,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mengambil status pembayaran dan transaksi kampanye iklan terkini.
+    Hanya dapat diakses oleh pemilik kampanye yang sah.
+    """
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kampanye iklan tidak ditemukan."
+        )
+
+    if str(campaign.owner_user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Anda tidak memiliki izin untuk melihat status pembayaran kampanye ini."
+        )
+
+    tx = (
+        db.query(PaymentTransaction)
+        .filter(PaymentTransaction.campaign_id == campaign.id)
+        .order_by(PaymentTransaction.created_at.desc())
+        .first()
+    )
+
+    return PaymentStatusResponse(
+        campaign_id=str(campaign.id),
+        campaign_status=campaign.status,
+        payment_status=campaign.payment_status,
+        transaction_status=tx.status if tx else None,
+        external_id=tx.external_id if tx else campaign.payment_ref,
+        xendit_invoice_id=tx.xendit_invoice_id if tx else None,
+        invoice_url=tx.invoice_url if tx else None,
+        amount=int(tx.amount) if tx else campaign.price_paid,
+        currency=tx.currency if tx else "IDR",
+        paid_at=tx.paid_at.isoformat() if tx and tx.paid_at else None,
+        expires_at=campaign.expires_at.isoformat() if campaign.expires_at else None,
     )
 
 
