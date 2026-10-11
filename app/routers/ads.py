@@ -282,8 +282,8 @@ def get_home_banners(
     stores = db.query(Store).filter(Store.id.in_(store_ids)).all()
     store_map = {str(s.id): s for s in stores}
     verified_owners = {
-        (str(owner.user_id), str(owner.store_id))
-        for owner in db.query(StoreOwner).filter(
+        (str(user_id), str(store_id))
+        for user_id, store_id in db.query(StoreOwner.user_id, StoreOwner.store_id).filter(
             StoreOwner.status == "verified",
             StoreOwner.verified_at.isnot(None),
         ).all()
@@ -1208,16 +1208,25 @@ def get_campaign_payment_status(
 
 def _ensure_seed_campaigns(db: Session):
     """
-    Inisialisasi sampel banner flyer promo untuk toko terkenal di Yogyakarta jika belum ada data iklan.
+    Inisialisasi sampel banner flyer promo untuk toko terkenal di Yogyakarta jika belum ada data iklan demo di development.
     """
-    count = db.query(AdCampaign).count()
-    if count > 0:
+    # ponytail: demo seeds only execute in non-production when ALLOW_DEMO_ADS=true
+    if not _is_demo_mode_allowed():
         return
 
     # Cari toko-toko di Jogja yang sudah ada
     stores = db.query(Store).limit(5).all()
     if not stores:
-        return
+        default_store = Store(
+            id=str(uuid.uuid4()),
+            nama="Pamela 6 Supermarket",
+            alamat="Jl. Raya Condongcatur No. 12, Sleman, Yogyakarta",
+            lat=-7.7589,
+            lng=110.4011,
+        )
+        db.add(default_store)
+        db.flush()
+        stores = [default_store]
 
     now = datetime.now(timezone.utc)
     sample_ads = [
@@ -1242,6 +1251,22 @@ def _ensure_seed_campaigns(db: Session):
     ]
 
     for i, ad_data in enumerate(sample_ads):
+        existing = (
+            db.query(AdCampaign)
+            .filter(
+                AdCampaign.owner_user_id == "00000000-0000-0000-0000-000000000000",
+                AdCampaign.payment_status == "demo",
+                AdCampaign.title == ad_data["title"],
+            )
+            .first()
+        )
+        if existing:
+            # Pastikan masa berlaku kampanye demo tetap aktif untuk development
+            if _ensure_utc(existing.expires_at) <= now or existing.status != "active":
+                existing.status = "active"
+                existing.expires_at = now + timedelta(days=ad_data["duration"])
+            continue
+
         store = stores[i % len(stores)]
         expires = now + timedelta(days=ad_data["duration"])
         campaign = AdCampaign(
@@ -1255,7 +1280,7 @@ def _ensure_seed_campaigns(db: Session):
             payment_status="demo",
             payment_method="DEMO",
             start_at=now,
-            expires_at=expires
+            expires_at=expires,
         )
         db.add(campaign)
 

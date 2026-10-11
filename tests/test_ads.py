@@ -1069,5 +1069,112 @@ class TestAdsModule(unittest.TestCase):
             self.assertEqual(res.status_code, 409)
             self.assertIn("sudah memiliki pemilik terverifikasi", res.json()["detail"])
 
+    def test_ensure_seed_campaigns_idempotent_and_creates_valid_demo_banners(self):
+        """_ensure_seed_campaigns creates valid test demo banners and running it multiple times does not duplicate."""
+        from app.routers.ads import _ensure_seed_campaigns
+        old_allow = os.environ.get("ALLOW_DEMO_ADS")
+        old_env = os.environ.get("ENVIRONMENT")
+        try:
+            os.environ["ALLOW_DEMO_ADS"] = "true"
+            os.environ["ENVIRONMENT"] = "development"
+
+            # 1. First run seeds 3 demo campaigns
+            _ensure_seed_campaigns(self.db)
+            demo_ads = (
+                self.db.query(AdCampaign)
+                .filter(AdCampaign.payment_status == "demo")
+                .all()
+            )
+            self.assertEqual(len(demo_ads), 3)
+
+            # Verify fields
+            for ad in demo_ads:
+                self.assertEqual(ad.owner_user_id, "00000000-0000-0000-0000-000000000000")
+                self.assertEqual(ad.payment_status, "demo")
+                self.assertEqual(ad.payment_method, "DEMO")
+                self.assertEqual(ad.status, "active")
+                self.assertTrue(ad.title)
+                self.assertTrue(ad.banner_url)
+                self.assertIn(ad.duration_days, [3, 7, 14])
+                self.assertEqual(str(ad.store_id), str(self.store.id))
+
+            # 2. Re-running does NOT create duplicates (idempotent)
+            _ensure_seed_campaigns(self.db)
+            demo_ads_after = (
+                self.db.query(AdCampaign)
+                .filter(AdCampaign.payment_status == "demo")
+                .all()
+            )
+            self.assertEqual(len(demo_ads_after), 3)
+        finally:
+            if old_allow is not None:
+                os.environ["ALLOW_DEMO_ADS"] = old_allow
+            else:
+                os.environ.pop("ALLOW_DEMO_ADS", None)
+            if old_env is not None:
+                os.environ["ENVIRONMENT"] = old_env
+            else:
+                os.environ.pop("ENVIRONMENT", None)
+
+    def test_ensure_seed_campaigns_blocked_on_production_or_without_allow_flag(self):
+        """_ensure_seed_campaigns never seeds demo data in production or when ALLOW_DEMO_ADS is unset."""
+        from app.routers.ads import _ensure_seed_campaigns
+        old_allow = os.environ.get("ALLOW_DEMO_ADS")
+        old_env = os.environ.get("ENVIRONMENT")
+        try:
+            # 1. Blocked in production even if ALLOW_DEMO_ADS is true
+            os.environ["ENVIRONMENT"] = "production"
+            os.environ["ALLOW_DEMO_ADS"] = "true"
+            _ensure_seed_campaigns(self.db)
+            count_prod = self.db.query(AdCampaign).filter(AdCampaign.payment_status == "demo").count()
+            self.assertEqual(count_prod, 0)
+
+            # 2. Blocked in development when ALLOW_DEMO_ADS is unset
+            os.environ["ENVIRONMENT"] = "development"
+            os.environ.pop("ALLOW_DEMO_ADS", None)
+            _ensure_seed_campaigns(self.db)
+            count_unset = self.db.query(AdCampaign).filter(AdCampaign.payment_status == "demo").count()
+            self.assertEqual(count_unset, 0)
+        finally:
+            if old_allow is not None:
+                os.environ["ALLOW_DEMO_ADS"] = old_allow
+            else:
+                os.environ.pop("ALLOW_DEMO_ADS", None)
+            if old_env is not None:
+                os.environ["ENVIRONMENT"] = old_env
+            else:
+                os.environ.pop("ENVIRONMENT", None)
+
+    def test_home_banners_endpoint_auto_seeds_and_returns_when_demo_allowed(self):
+        """GET /ads/home-banners auto-seeds demo data and returns them when ALLOW_DEMO_ADS=true and include_demo=true."""
+        old_allow = os.environ.get("ALLOW_DEMO_ADS")
+        old_env = os.environ.get("ENVIRONMENT")
+        try:
+            os.environ["ALLOW_DEMO_ADS"] = "true"
+            os.environ["ENVIRONMENT"] = "development"
+
+            # 1. Request with include_demo=true returns seeded demo campaigns
+            res = self.client.get("/ads/home-banners?lat=-7.7589&lng=110.4011&radius_km=15&include_demo=true")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertGreaterEqual(len(data), 1)
+            for item in data:
+                self.assertEqual(item["payment_status"], "demo")
+                self.assertEqual(item["payment_method"], "DEMO")
+
+            # 2. Standard request without include_demo excludes demo campaigns (returns empty)
+            std_res = self.client.get("/ads/home-banners?lat=-7.7589&lng=110.4011&radius_km=15")
+            self.assertEqual(std_res.status_code, 200)
+            self.assertEqual(std_res.json(), [])
+        finally:
+            if old_allow is not None:
+                os.environ["ALLOW_DEMO_ADS"] = old_allow
+            else:
+                os.environ.pop("ALLOW_DEMO_ADS", None)
+            if old_env is not None:
+                os.environ["ENVIRONMENT"] = old_env
+            else:
+                os.environ.pop("ENVIRONMENT", None)
+
 if __name__ == "__main__":
     unittest.main()
