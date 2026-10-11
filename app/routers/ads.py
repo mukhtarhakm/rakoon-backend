@@ -474,9 +474,13 @@ def claim_store(
     except HTTPException:
         db.rollback()
         raise
-    except Exception:
+    except Exception as e:
         db.rollback()
-        raise
+        logger.error(f"Error in claim_store: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Terjadi kesalahan pada server saat memproses klaim toko."
+        )
 
     return get_my_store(user_id=user_id, db=db)
 

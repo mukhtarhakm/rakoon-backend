@@ -1069,6 +1069,25 @@ class TestAdsModule(unittest.TestCase):
             self.assertEqual(res.status_code, 409)
             self.assertIn("sudah memiliki pemilik terverifikasi", res.json()["detail"])
 
+    def test_claim_store_unexpected_error_returns_clean_500_json_with_rollback(self):
+        """Unexpected internal server errors during claim-store return structured 500 JSON without leaking raw internals."""
+        from sqlalchemy.orm import Session
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+
+        def faulty_commit(session_self):
+            raise RuntimeError("Simulated internal DB failure")
+
+        with patch.object(Session, "commit", faulty_commit):
+            res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+            self.assertEqual(res.status_code, 500)
+            self.assertEqual(res.headers.get("content-type"), "application/json")
+            self.assertEqual(res.json(), {"detail": "Terjadi kesalahan pada server saat memproses klaim toko."})
+
+        # DB must have no pending owner record created
+        self.db.expire_all()
+        db_owner = self.db.query(StoreOwner).filter(StoreOwner.user_id == TEST_USER_ID).first()
+        self.assertIsNone(db_owner)
+
     def test_ensure_seed_campaigns_idempotent_and_creates_valid_demo_banners(self):
         """_ensure_seed_campaigns creates valid test demo banners and running it multiple times does not duplicate."""
         from app.routers.ads import _ensure_seed_campaigns
