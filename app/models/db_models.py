@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid, Index, Numeric
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid, Index, Numeric, text
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -72,6 +72,15 @@ class PriceEntry(Base):
 
 class StoreOwner(Base):
     __tablename__ = "store_owners"
+    __table_args__ = (
+        Index(
+            "uq_store_owners_verified_store",
+            "store_id",
+            unique=True,
+            postgresql_where=text("status = 'verified' AND verified_at IS NOT NULL"),
+            sqlite_where=text("status = 'verified' AND verified_at IS NOT NULL"),
+        ),
+    )
 
     id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
@@ -79,6 +88,7 @@ class StoreOwner(Base):
     status = Column(String, default="pending", nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     verified_at = Column(DateTime(timezone=True), nullable=True)
+    rejection_reason = Column(String, nullable=True)
 
     store = relationship("Store")
 

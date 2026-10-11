@@ -150,6 +150,7 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(reject_res.status_code, 200)
         self.assertFalse(reject_res.json()["is_claimed"])
         self.assertEqual(reject_res.json()["claim_status"], "rejected")
+        self.assertEqual(reject_res.json()["rejection_reason"], "Dokumen tidak lengkap")
 
         # 5a. Rejected claim cannot be verified directly or rejected again
         verify_rejected = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
@@ -160,21 +161,25 @@ class TestAdsModule(unittest.TestCase):
         # 6. Rejected claim is removed from pending claims
         self.assertEqual(self.client.get("/ads/pending-claims").json(), [])
 
-        # 7. Merchant checks status: reflects rejected
+        # 7. Merchant checks status: reflects rejected and includes rejection_reason
         my_store = self.client.get("/ads/my-store")
         self.assertEqual(my_store.status_code, 200)
         self.assertEqual(my_store.json()["claim_status"], "rejected")
+        self.assertEqual(my_store.json()["rejection_reason"], "Dokumen tidak lengkap")
         self.assertFalse(my_store.json()["is_claimed"])
 
-        # 8. Merchant can re-claim and admin approves it
+        # 8. Merchant can re-claim (resets rejection_reason to None) and admin approves it
         reclaim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
         self.assertEqual(reclaim_res.status_code, 200)
+        self.assertEqual(reclaim_res.json()["claim_status"], "pending")
+        self.assertIsNone(reclaim_res.json()["rejection_reason"])
         self.assertEqual(len(self.client.get("/ads/pending-claims").json()), 1)
 
         verify_res = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
         self.assertEqual(verify_res.status_code, 200)
         self.assertTrue(verify_res.json()["is_claimed"])
         self.assertEqual(verify_res.json()["claim_status"], "verified")
+        self.assertIsNone(verify_res.json()["rejection_reason"])
 
         # 9. Already verified claim cannot be rejected or re-verified
         reject_verified = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
@@ -778,6 +783,291 @@ class TestAdsModule(unittest.TestCase):
                 os.environ["XENDIT_SECRET_KEY"] = old_key
             else:
                 os.environ.pop("XENDIT_SECRET_KEY", None)
+
+    def test_rejection_reason_persistence_and_privacy_isolation(self):
+        """Admin rejection reason must persist in DB, be visible only to claim owner, and hidden from others."""
+        # 1. User claims store
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+
+        # 2. Admin rejects with explicit reason
+        reason_text = "Bukti foto surat izin usaha tidak valid dan buram."
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+        reject_res = self.client.post("/ads/reject-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+            "reason": reason_text,
+        })
+        self.assertEqual(reject_res.status_code, 200)
+        self.assertEqual(reject_res.json()["rejection_reason"], reason_text)
+
+        # 3. Verify in database record directly
+        db_owner = self.db.query(StoreOwner).filter(StoreOwner.user_id == TEST_USER_ID).first()
+        self.assertIsNotNone(db_owner)
+        self.assertEqual(db_owner.status, "rejected")
+        self.assertEqual(db_owner.rejection_reason, reason_text)
+
+        # 4. Owner retrieves my-store: receives rejection_reason
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        owner_store = self.client.get("/ads/my-store")
+        self.assertEqual(owner_store.status_code, 200)
+        self.assertEqual(owner_store.json()["claim_status"], "rejected")
+        self.assertEqual(owner_store.json()["rejection_reason"], reason_text)
+
+        # 5. Other user retrieves my-store: does not receive or leak other's rejection_reason
+        app.dependency_overrides[get_current_user] = lambda: OTHER_USER_ID
+        other_store = self.client.get("/ads/my-store")
+        self.assertEqual(other_store.status_code, 200)
+        self.assertFalse(other_store.json()["is_claimed"])
+        self.assertIsNone(other_store.json()["claim_status"])
+        self.assertIsNone(other_store.json()["rejection_reason"])
+
+    def test_atomic_approval_and_auto_reject_competing_claims(self):
+        """Approving one claim must atomically verify it and reject all competing pending claims for that store."""
+        third_user_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+        # 1. User A (TEST_USER_ID) claims store
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+
+        # 2. User B and User C submit pending claims for the same store
+        claim_b = StoreOwner(user_id=OTHER_USER_ID, store_id=self.store.id, status="pending")
+        claim_c = StoreOwner(user_id=third_user_id, store_id=self.store.id, status="pending")
+        self.db.add_all([claim_b, claim_c])
+        self.db.commit()
+
+        # 3. Admin sees 3 pending claims in total
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+        pending_list = self.client.get("/ads/pending-claims").json()
+        self.assertEqual(len(pending_list), 3)
+
+        # 4. Admin approves User A
+        verify_res = self.client.post("/ads/verify-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+        })
+        self.assertEqual(verify_res.status_code, 200)
+        self.assertTrue(verify_res.json()["is_claimed"])
+        self.assertEqual(verify_res.json()["claim_status"], "verified")
+        self.assertIsNone(verify_res.json()["rejection_reason"])
+
+        # 5. Admin pending claims is now completely EMPTY
+        self.assertEqual(self.client.get("/ads/pending-claims").json(), [])
+
+        # 6. Competing claims B and C are rejected with the official system reason in database
+        self.db.expire_all()
+        owner_b = self.db.query(StoreOwner).filter(StoreOwner.user_id == OTHER_USER_ID).first()
+        owner_c = self.db.query(StoreOwner).filter(StoreOwner.user_id == third_user_id).first()
+        self.assertEqual(owner_b.status, "rejected")
+        self.assertEqual(owner_b.rejection_reason, "Toko telah diverifikasi untuk mitra lain.")
+        self.assertIsNone(owner_b.verified_at)
+        self.assertEqual(owner_c.status, "rejected")
+        self.assertEqual(owner_c.rejection_reason, "Toko telah diverifikasi untuk mitra lain.")
+        self.assertIsNone(owner_c.verified_at)
+
+        # 7. User B checks my-store: sees rejected with system reason
+        app.dependency_overrides[get_current_user] = lambda: OTHER_USER_ID
+        store_b_res = self.client.get("/ads/my-store")
+        self.assertEqual(store_b_res.status_code, 200)
+        self.assertEqual(store_b_res.json()["claim_status"], "rejected")
+        self.assertEqual(store_b_res.json()["rejection_reason"], "Toko telah diverifikasi untuk mitra lain.")
+
+        # 8. User B attempts to re-claim the already owned store: blocked with 409 Conflict
+        reclaim_b = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.assertEqual(reclaim_b.status_code, 409)
+        self.assertIn("sudah memiliki pemilik terverifikasi", reclaim_b.json()["detail"])
+
+    def test_approval_rollback_on_failure_leaves_no_partial_changes(self):
+        """If a failure occurs during verification, the entire transaction rolls back cleanly without partial mutations."""
+        # 1. User A and User B have pending claims
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+
+        claim_b = StoreOwner(user_id=OTHER_USER_ID, store_id=self.store.id, status="pending")
+        self.db.add(claim_b)
+        self.db.commit()
+
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+
+        # 2. Simulate database failure during commit
+        from sqlalchemy.orm import Session
+        original_commit = Session.commit
+        def faulty_commit(session_self):
+            raise RuntimeError("Simulated transient database connection drop")
+
+        with patch.object(Session, "commit", faulty_commit):
+            with self.assertRaises(RuntimeError):
+                self.client.post("/ads/verify-claim", json={
+                    "user_id": TEST_USER_ID,
+                    "store_id": str(self.store.id),
+                })
+
+        # 3. Verify that both records in DB remain strictly pending and NO partial mutations occurred
+        self.db.expire_all()
+        owner_a = self.db.query(StoreOwner).filter(StoreOwner.user_id == TEST_USER_ID).first()
+        owner_b = self.db.query(StoreOwner).filter(StoreOwner.user_id == OTHER_USER_ID).first()
+        self.assertEqual(owner_a.status, "pending")
+        self.assertIsNone(owner_a.verified_at)
+        self.assertEqual(owner_b.status, "pending")
+        self.assertIsNone(owner_b.rejection_reason)
+
+    def test_concurrent_approvals_only_one_succeeds_and_conflicts_rejected(self):
+        """Concurrent approvals for the same store: only one can succeed, second gets 409, and exactly 1 verified owner exists."""
+        # 1. Setup pending claims for User A and User B
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+
+        claim_b = StoreOwner(user_id=OTHER_USER_ID, store_id=self.store.id, status="pending")
+        self.db.add(claim_b)
+        self.db.commit()
+
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+
+        # 2. Approve User A
+        res_a = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(res_a.status_code, 200)
+        self.assertTrue(res_a.json()["is_claimed"])
+
+        # 3. Racing approval for User B must be rejected with 409 Conflict
+        res_b = self.client.post("/ads/verify-claim", json={"user_id": OTHER_USER_ID, "store_id": str(self.store.id)})
+        self.assertIn(res_b.status_code, [400, 409])
+        if res_b.status_code == 409:
+            self.assertIn("sudah memiliki pemilik terverifikasi", res_b.json()["detail"])
+        else:
+            self.assertIn("sudah ditolak", res_b.json()["detail"])
+
+        # 4. Strict DB assertion: exactly ONE verified owner exists for this store
+        self.db.expire_all()
+        verified_count = (
+            self.db.query(StoreOwner)
+            .filter(
+                StoreOwner.store_id == self.store.id,
+                StoreOwner.status == "verified",
+                StoreOwner.verified_at.isnot(None),
+            )
+            .count()
+        )
+        self.assertEqual(verified_count, 1)
+
+    def test_concurrent_approval_with_manual_rejection_prevents_stale_approval(self):
+        """If a claim is rejected before or during approval serialization, approval must reject with 400 Bad Request."""
+        # 1. Setup pending claim
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+
+        # 2. Reject claim
+        rej_res = self.client.post("/ads/reject-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+            "reason": "Data usaha meragukan",
+        })
+        self.assertEqual(rej_res.status_code, 200)
+
+        # 3. Racing verify-claim receives 400 because claim is already rejected
+        ver_res = self.client.post("/ads/verify-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+        })
+        self.assertEqual(ver_res.status_code, 400)
+        self.assertIn("sudah ditolak tidak dapat langsung disetujui", ver_res.json()["detail"])
+
+        # 4. DB state remains rejected
+        self.db.expire_all()
+        db_owner = self.db.query(StoreOwner).filter(StoreOwner.user_id == TEST_USER_ID).first()
+        self.assertEqual(db_owner.status, "rejected")
+        self.assertIsNone(db_owner.verified_at)
+
+    def test_manual_rejection_and_reclaim_conflict_if_store_taken(self):
+        """User whose claim was rejected cannot re-claim if store was verified to another merchant in the meantime."""
+        # 1. User A claims store, gets rejected
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+        self.client.post("/ads/reject-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+            "reason": "Dokumen tidak lengkap",
+        })
+
+        # 2. Store is claimed and verified by User B
+        claim_b = StoreOwner(user_id=OTHER_USER_ID, store_id=self.store.id, status="pending")
+        self.db.add(claim_b)
+        self.db.commit()
+
+        ver_b = self.client.post("/ads/verify-claim", json={"user_id": OTHER_USER_ID, "store_id": str(self.store.id)})
+        self.assertEqual(ver_b.status_code, 200)
+
+        # 3. User A attempts to re-claim: must be rejected with 409 Conflict
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        reclaim_a = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.assertEqual(reclaim_a.status_code, 409)
+        self.assertIn("sudah memiliki pemilik terverifikasi", reclaim_a.json()["detail"])
+
+    def test_partial_unique_index_enforces_maximum_one_verified_owner_at_db_level(self):
+        """Database constraint uq_store_owners_verified_store prevents two verified owners for the same store."""
+        from sqlalchemy.exc import IntegrityError
+        # 1. Create first verified owner
+        owner1 = StoreOwner(
+            user_id=TEST_USER_ID,
+            store_id=self.store.id,
+            status="verified",
+            verified_at=datetime.now(timezone.utc),
+        )
+        self.db.add(owner1)
+        self.db.commit()
+
+        # 2. Attempting to add a second verified owner for the same store must fail at DB level
+        owner2 = StoreOwner(
+            user_id=OTHER_USER_ID,
+            store_id=self.store.id,
+            status="verified",
+            verified_at=datetime.now(timezone.utc),
+        )
+        self.db.add(owner2)
+        with self.assertRaises(IntegrityError):
+            self.db.commit()
+
+        self.db.rollback()
+
+    def test_integrity_error_during_verify_claim_returns_409_with_clean_rollback(self):
+        """If IntegrityError occurs during verify-claim commit, returns HTTP 409 without crashing with 500."""
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.orm import Session
+
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+
+        def faulty_commit(session_self):
+            raise IntegrityError("UNIQUE constraint failed: uq_store_owners_verified_store", params=None, orig=Exception())
+
+        with patch.object(Session, "commit", faulty_commit):
+            res = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+            self.assertEqual(res.status_code, 409)
+            self.assertIn("sudah memiliki pemilik terverifikasi", res.json()["detail"])
+
+        # Check that state remains pending after rollback
+        self.db.expire_all()
+        db_owner = self.db.query(StoreOwner).filter(StoreOwner.user_id == TEST_USER_ID).first()
+        self.assertEqual(db_owner.status, "pending")
+
+    def test_integrity_error_during_claim_store_returns_409_with_clean_rollback(self):
+        """If IntegrityError occurs during claim-store commit, returns HTTP 409 without crashing with 500."""
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.orm import Session
+
+        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
+
+        def faulty_commit(session_self):
+            raise IntegrityError("UNIQUE constraint failed: uq_store_owners_verified_store", params=None, orig=Exception())
+
+        with patch.object(Session, "commit", faulty_commit):
+            res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+            self.assertEqual(res.status_code, 409)
+            self.assertIn("sudah memiliki pemilik terverifikasi", res.json()["detail"])
 
 if __name__ == "__main__":
     unittest.main()

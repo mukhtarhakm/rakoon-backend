@@ -148,6 +148,7 @@ class MyStoreResponse(BaseModel):
     store_alamat: Optional[str] = None
     store_lat: Optional[float] = None
     store_lng: Optional[float] = None
+    rejection_reason: Optional[str] = None
     campaigns: List[HomeBannerItem] = []
 
 
@@ -403,6 +404,7 @@ def get_my_store(
         store_alamat=store.alamat,
         store_lat=store.lat,
         store_lng=store.lng,
+        rejection_reason=owner.rejection_reason if owner.status == "rejected" else None,
         campaigns=items
     )
 
@@ -416,50 +418,65 @@ def claim_store(
     """
     Mengaitkan akun pengguna dengan toko yang dipilih sebagai pemilik toko.
     """
-    store = db.query(Store).filter(Store.id == payload.store_id).first()
-    if not store:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Toko yang dipilih tidak ditemukan."
-        )
+    try:
+        store = db.query(Store).filter(Store.id == payload.store_id).with_for_update().first()
+        if not store:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Toko yang dipilih tidak ditemukan."
+            )
 
-    existing_owner = (
-        db.query(StoreOwner)
-        .filter(
-            StoreOwner.store_id == store.id,
-            StoreOwner.status == "verified",
-            StoreOwner.verified_at.isnot(None),
+        existing_owner = (
+            db.query(StoreOwner)
+            .filter(
+                StoreOwner.store_id == store.id,
+                StoreOwner.status == "verified",
+                StoreOwner.verified_at.isnot(None),
+            )
+            .first()
         )
-        .first()
-    )
-    if existing_owner and str(existing_owner.user_id) != user_id:
+        if existing_owner and str(existing_owner.user_id) != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Toko ini sudah memiliki pemilik terverifikasi."
+            )
+
+        owner = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).with_for_update().first()
+        if not owner:
+            owner = StoreOwner(
+                user_id=user_id,
+                store_id=store.id,
+                status="pending",
+                rejection_reason=None
+            )
+            db.add(owner)
+        else:
+            if owner.status == "verified" and owner.verified_at is not None:
+                if str(owner.store_id) != str(store.id):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Akun ini sudah menjadi pemilik terverifikasi toko lain."
+                    )
+                return get_my_store(user_id=user_id, db=db)
+            owner.store_id = store.id
+            owner.status = "pending"
+            owner.verified_at = None
+            owner.rejection_reason = None
+
+        db.commit()
+        db.refresh(owner)
+    except IntegrityError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Toko ini sudah memiliki pemilik terverifikasi."
+            detail="Toko ini sudah memiliki pemilik terverifikasi atau klaim sedang diproses."
         )
-
-    owner = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).first()
-    if not owner:
-        owner = StoreOwner(
-            user_id=user_id,
-            store_id=store.id,
-            status="pending"
-        )
-        db.add(owner)
-    else:
-        if owner.status == "verified" and owner.verified_at is not None:
-            if str(owner.store_id) != str(store.id):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Akun ini sudah menjadi pemilik terverifikasi toko lain."
-                )
-            return get_my_store(user_id=user_id, db=db)
-        owner.store_id = store.id
-        owner.status = "pending"
-        owner.verified_at = None
-
-    db.commit()
-    db.refresh(owner)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
     return get_my_store(user_id=user_id, db=db)
 
@@ -519,29 +536,47 @@ def reject_store_claim(
 ):
     """Tolak klaim toko oleh admin."""
     # ponytail: sets status to rejected without audit table; add audit log table when SLA tracking is needed
-    owner = (
-        db.query(StoreOwner)
-        .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
-        .first()
-    )
-    if not owner:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
+    try:
+        # 1. Acquire row lock on Store first to serialize with verify/claim operations
+        store = db.query(Store).filter(Store.id == payload.store_id).with_for_update().first()
+        if not store:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toko yang dipilih tidak ditemukan.")
 
-    if owner.status == "verified" and owner.verified_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Klaim toko yang sudah terverifikasi tidak dapat ditolak."
+        # 2. Acquire row lock on target StoreOwner inside transaction (avoids stale read)
+        owner = (
+            db.query(StoreOwner)
+            .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
+            .with_for_update()
+            .first()
         )
+        if not owner:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
 
-    if owner.status == "rejected":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Klaim toko sudah dalam status ditolak."
-        )
+        if owner.status == "verified" and owner.verified_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Klaim toko yang sudah terverifikasi tidak dapat ditolak."
+            )
 
-    owner.status = "rejected"
-    owner.verified_at = None
-    db.commit()
+        if owner.status == "rejected":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Klaim toko sudah dalam status ditolak."
+            )
+
+        clean_reason = payload.reason.strip() if payload.reason and payload.reason.strip() else None
+
+        owner.status = "rejected"
+        owner.verified_at = None
+        owner.rejection_reason = clean_reason
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
     return get_my_store(user_id=payload.user_id, db=db)
 
 
@@ -552,44 +587,82 @@ def verify_store_claim(
     db: Session = Depends(get_db)
 ):
     """Setujui klaim toko setelah bukti kepemilikan diperiksa oleh admin."""
-    owner = (
-        db.query(StoreOwner)
-        .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
-        .first()
-    )
-    if not owner:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
+    try:
+        # 1. Acquire row lock on Store first to serialize all claim decisions for this store
+        store = db.query(Store).filter(Store.id == payload.store_id).with_for_update().first()
+        if not store:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toko yang dipilih tidak ditemukan.")
 
-    if owner.status == "rejected":
+        # 2. Acquire row lock on target StoreOwner inside transaction (avoids stale read)
+        owner = (
+            db.query(StoreOwner)
+            .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
+            .with_for_update()
+            .first()
+        )
+        if not owner:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
+
+        if owner.status == "rejected":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Klaim toko yang sudah ditolak tidak dapat langsung disetujui. Pengguna harus mengajukan klaim ulang terlebih dahulu."
+            )
+
+        if owner.status == "verified" and owner.verified_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Klaim toko sudah dalam status terverifikasi."
+            )
+
+        # 3. Check if another user is already verified for this store
+        other_owner = (
+            db.query(StoreOwner)
+            .filter(
+                StoreOwner.store_id == owner.store_id,
+                StoreOwner.status == "verified",
+                StoreOwner.verified_at.isnot(None),
+                StoreOwner.user_id != owner.user_id,
+            )
+            .first()
+        )
+        if other_owner:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Toko sudah memiliki pemilik terverifikasi.")
+
+        owner.status = "verified"
+        owner.verified_at = datetime.now(timezone.utc)
+        owner.rejection_reason = None
+
+        # 4. Atomically auto-reject competing pending claims for the same store
+        competing_claims = (
+            db.query(StoreOwner)
+            .filter(
+                StoreOwner.store_id == owner.store_id,
+                StoreOwner.id != owner.id,
+                StoreOwner.status == "pending",
+            )
+            .with_for_update()
+            .all()
+        )
+        for competing in competing_claims:
+            competing.status = "rejected"
+            competing.verified_at = None
+            competing.rejection_reason = "Toko telah diverifikasi untuk mitra lain."
+
+        db.commit()
+    except IntegrityError:
+        db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Klaim toko yang sudah ditolak tidak dapat langsung disetujui. Pengguna harus mengajukan klaim ulang terlebih dahulu."
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Toko sudah memiliki pemilik terverifikasi."
         )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
-    if owner.status == "verified" and owner.verified_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Klaim toko sudah dalam status terverifikasi."
-        )
-
-    # Serialize approvals for the same store on PostgreSQL before checking ownership.
-    db.query(Store).filter(Store.id == owner.store_id).with_for_update().first()
-    other_owner = (
-        db.query(StoreOwner)
-        .filter(
-            StoreOwner.store_id == owner.store_id,
-            StoreOwner.status == "verified",
-            StoreOwner.verified_at.isnot(None),
-            StoreOwner.user_id != owner.user_id,
-        )
-        .first()
-    )
-    if other_owner:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Toko sudah memiliki pemilik terverifikasi.")
-
-    owner.status = "verified"
-    owner.verified_at = datetime.now(timezone.utc)
-    db.commit()
     return get_my_store(user_id=payload.user_id, db=db)
 
 
