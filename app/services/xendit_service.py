@@ -39,12 +39,15 @@ def get_xendit_config() -> Dict[str, Any]:
     if not secret_key.startswith("xnd_development_"):
         raise XenditConfigError("XENDIT_SECRET_KEY must be a valid Xendit sandbox development key (prefix 'xnd_development_').")
 
+    success_redirect = (os.getenv("XENDIT_SUCCESS_REDIRECT_URL") or "").strip() or "rakoon://checkout/success"
+    failure_redirect = (os.getenv("XENDIT_FAILURE_REDIRECT_URL") or "").strip() or "rakoon://checkout/failure"
+
     return {
         "secret_key": secret_key,
         "webhook_token": webhook_token,
         "environment": environment,
-        "success_redirect_url": os.getenv("XENDIT_SUCCESS_REDIRECT_URL"),
-        "failure_redirect_url": os.getenv("XENDIT_FAILURE_REDIRECT_URL"),
+        "success_redirect_url": success_redirect,
+        "failure_redirect_url": failure_redirect,
     }
 
 
@@ -101,6 +104,36 @@ def get_invoice_by_external_id(
         return None
     except Exception as e:
         logger.warning(f"Failed to reconcile existing invoice from Xendit: {type(e).__name__}")
+        return None
+
+
+def get_invoice_by_id(
+    invoice_id: str,
+    client: Optional[httpx.Client] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Queries Xendit API for an invoice by its Xendit invoice ID.
+    Used for safe fallback reconciliation when checking payment status.
+    """
+    config = get_xendit_config()
+    secret_key = config["secret_key"]
+    url = f"{XENDIT_INVOICE_API_URL}/{invoice_id}"
+    headers = {"Accept": "application/json"}
+
+    try:
+        if client is not None:
+            response = client.get(url, headers=headers, auth=(secret_key, ""), timeout=10.0)
+        else:
+            with httpx.Client(timeout=10.0) as http_client:
+                response = http_client.get(url, headers=headers, auth=(secret_key, ""))
+
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict) and "id" in data:
+                return data
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to fetch invoice by ID from Xendit: {type(e).__name__}")
         return None
 
 

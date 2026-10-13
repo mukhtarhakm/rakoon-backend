@@ -204,6 +204,66 @@ def _has_verified_provider_proof(campaign: AdCampaign, db: Optional[Session] = N
     return False
 
 
+def _reconcile_transaction_with_xendit(
+    tx: PaymentTransaction,
+    campaign: AdCampaign,
+    db: Session,
+) -> bool:
+    """
+    Safely reconciles a pending transaction with Xendit API.
+    Acts as a fallback when webhooks are delayed, dropped, or unreachable (e.g. local environment).
+    Never marks paid unless Xendit API explicitly confirms status as PAID or SETTLED.
+    """
+    if not tx or tx.status != "PENDING":
+        return False
+
+    try:
+        x_inv = None
+        if tx.xendit_invoice_id:
+            x_inv = xendit_service.get_invoice_by_id(tx.xendit_invoice_id)
+        if not x_inv and tx.external_id:
+            x_inv = xendit_service.get_invoice_by_external_id(tx.external_id)
+
+        if not x_inv or not isinstance(x_inv, dict):
+            return False
+
+        x_status = (x_inv.get("status") or "").upper()
+        now = datetime.now(timezone.utc)
+
+        if x_status in ("PAID", "SETTLED"):
+            if tx.status != "PAID":
+                tx.status = "PAID"
+                tx.paid_at = _parse_iso(x_inv.get("paid_at")) or now
+                tx.updated_at = now
+                if x_inv.get("id"):
+                    tx.xendit_invoice_id = x_inv["id"]
+
+                campaign.payment_status = "paid"
+                campaign.status = "active"
+                campaign.payment_ref = x_inv.get("id") or tx.external_id
+                campaign.start_at = now
+                campaign.expires_at = now + timedelta(days=campaign.duration_days)
+
+                db.commit()
+                logger.info(f"Transaction {tx.external_id} for campaign {campaign.id} reconciled as PAID via Xendit API")
+                return True
+        elif x_status == "EXPIRED":
+            if tx.status != "PAID":
+                tx.status = "EXPIRED"
+                tx.updated_at = now
+                db.commit()
+        elif x_status == "FAILED":
+            if tx.status != "PAID":
+                tx.status = "FAILED"
+                tx.updated_at = now
+                db.commit()
+    except Exception as e:
+        logger.warning(f"Error during Xendit payment reconciliation for {tx.external_id}: {e}")
+        db.rollback()
+
+    return False
+
+
 def _is_demo_mode_allowed() -> bool:
     """
     Mode demo HANYA diizinkan jika secara eksplisit diaktifkan melalui konfigurasi server
@@ -368,6 +428,19 @@ def get_my_store(
         .order_by(AdCampaign.created_at.desc())
         .all()
     )
+
+    # Reconcile pending campaigns with Xendit API as fallback for missed/delayed webhooks
+    if xendit_service.is_xendit_sandbox_configured():
+        for c in campaigns:
+            if c.status == "pending_payment" or c.payment_status == "unpaid":
+                tx = (
+                    db.query(PaymentTransaction)
+                    .filter(PaymentTransaction.campaign_id == c.id)
+                    .order_by(PaymentTransaction.created_at.desc())
+                    .first()
+                )
+                if tx and tx.status == "PENDING":
+                    _reconcile_transaction_with_xendit(tx, c, db)
 
     items = []
     for c in campaigns:
@@ -1194,6 +1267,10 @@ def get_campaign_payment_status(
         .order_by(PaymentTransaction.created_at.desc())
         .first()
     )
+
+    # Reconcile pending transaction with Xendit API as fallback for missed/delayed webhooks
+    if tx and tx.status == "PENDING" and xendit_service.is_xendit_sandbox_configured():
+        _reconcile_transaction_with_xendit(tx, campaign, db)
 
     return PaymentStatusResponse(
         campaign_id=str(campaign.id),

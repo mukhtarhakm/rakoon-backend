@@ -756,6 +756,131 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertEqual(result["invoice_url"], "https://checkout.xendit.co/inv-reconciled")
         mock_get_by_ext.assert_called_once_with("INV-20261010-RECON", client=mock_client)
 
+    # 25. Payment status endpoint reconciles paid invoice from Xendit API fallback
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_25_payment_status_reconciles_paid_invoice_from_xendit_api(self, mock_create_inv, mock_get_by_id):
+        campaign_data = self._create_pending_campaign()
+        campaign_id = campaign_data["id"]
+        ext_id = campaign_data["payment_ref"]
+
+        mock_create_inv.return_value = {
+            "id": "xinv_reconcile_test",
+            "external_id": ext_id,
+            "status": "PENDING",
+            "invoice_url": "https://checkout.xendit.co/inv-test",
+            "amount": 15000,
+        }
+        self.client.post(f"/ads/campaigns/{campaign_id}/pay")
+
+        # Mock Xendit API returning PAID
+        mock_get_by_id.return_value = {
+            "id": "xinv_reconcile_test",
+            "external_id": ext_id,
+            "status": "PAID",
+            "paid_amount": 15000,
+            "paid_at": "2026-10-13T12:00:00Z",
+        }
+
+        # Check status -> must reconcile to PAID
+        status_res = self.client.get(f"/ads/campaigns/{campaign_id}/payment-status")
+        self.assertEqual(status_res.status_code, 200)
+        status_data = status_res.json()
+        self.assertEqual(status_data["payment_status"], "paid")
+        self.assertEqual(status_data["campaign_status"], "active")
+        self.assertEqual(status_data["transaction_status"], "PAID")
+
+        # Verify DB updated
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+        self.assertEqual(campaign.payment_status, "paid")
+        self.assertEqual(campaign.status, "active")
+
+    # 26. Payment status endpoint reconciles expired invoice from Xendit API fallback
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_26_payment_status_reconciles_expired_invoice_from_xendit_api(self, mock_create_inv, mock_get_by_id):
+        campaign_data = self._create_pending_campaign()
+        campaign_id = campaign_data["id"]
+        ext_id = campaign_data["payment_ref"]
+
+        mock_create_inv.return_value = {
+            "id": "xinv_reconcile_exp",
+            "external_id": ext_id,
+            "status": "PENDING",
+            "invoice_url": "https://checkout.xendit.co/inv-exp",
+            "amount": 15000,
+        }
+        self.client.post(f"/ads/campaigns/{campaign_id}/pay")
+
+        # Mock Xendit API returning EXPIRED
+        mock_get_by_id.return_value = {
+            "id": "xinv_reconcile_exp",
+            "external_id": ext_id,
+            "status": "EXPIRED",
+        }
+
+        status_res = self.client.get(f"/ads/campaigns/{campaign_id}/payment-status")
+        self.assertEqual(status_res.status_code, 200)
+        self.assertEqual(status_res.json()["transaction_status"], "EXPIRED")
+
+    # 27. Create invoice payload includes default redirect URLs
+    def test_27_create_invoice_includes_default_redirect_urls(self):
+        from app.services import xendit_service
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "id": "xinv_redirect_test",
+            "invoice_url": "https://checkout.xendit.co/inv-red",
+        }
+        mock_client.post.return_value = mock_resp
+
+        xendit_service.create_invoice(
+            external_id="INV-REDIRECT-TEST",
+            amount=15000,
+            description="Test Redirect",
+            client=mock_client
+        )
+        called_payload = mock_client.post.call_args[1]["json"]
+        self.assertEqual(called_payload["success_redirect_url"], "rakoon://checkout/success")
+        self.assertEqual(called_payload["failure_redirect_url"], "rakoon://checkout/failure")
+
+    # 28. get_my_store endpoint reconciles pending campaigns with Xendit API
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_28_get_my_store_reconciles_pending_campaign(self, mock_create_inv, mock_get_by_id):
+        campaign_data = self._create_pending_campaign()
+        campaign_id = campaign_data["id"]
+        ext_id = campaign_data["payment_ref"]
+
+        mock_create_inv.return_value = {
+            "id": "xinv_my_store_recon",
+            "external_id": ext_id,
+            "status": "PENDING",
+            "invoice_url": "https://checkout.xendit.co/inv-my-store",
+            "amount": 15000,
+        }
+        self.client.post(f"/ads/campaigns/{campaign_id}/pay")
+
+        # Mock Xendit API returning PAID
+        mock_get_by_id.return_value = {
+            "id": "xinv_my_store_recon",
+            "external_id": ext_id,
+            "status": "PAID",
+            "paid_amount": 15000,
+            "paid_at": "2026-10-13T12:00:00Z",
+        }
+
+        # Query /my-store -> campaign must be active and paid
+        res = self.client.get("/ads/my-store")
+        self.assertEqual(res.status_code, 200)
+        c_list = res.json()["campaigns"]
+        matching = [c for c in c_list if c["id"] == campaign_id]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["payment_status"], "paid")
+        self.assertEqual(matching[0]["status"], "active")
+
 
 if __name__ == "__main__":
     unittest.main()
