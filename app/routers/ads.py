@@ -1,19 +1,22 @@
 import os
 import math
 import uuid
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File
+from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field
 
 from app.database import get_db, supabase
-from app.dependencies import get_current_user, get_current_admin_user
-from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, User
+from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
+from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, User, StoreSubmission
 from app.services import xendit_service
 from app.routers.stores import haversine_distance
 from app.routers.products import detect_image_type
@@ -25,6 +28,81 @@ router = APIRouter()
 SUPABASE_BUCKET = "product-photos"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+PRIVATE_DOCS_DIR = Path(__file__).resolve().parent.parent.parent / "private_storage" / "documents"
+PRIVATE_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _has_store_submissions_table(db: Session) -> bool:
+    try:
+        from sqlalchemy import inspect
+        insp = inspect(db.get_bind())
+        return insp.has_table("store_submissions")
+    except Exception:
+        return False
+
+
+def _get_user_latest_submission(user_id: str, db: Session) -> Optional[StoreSubmission]:
+    if not _has_store_submissions_table(db):
+        return None
+    try:
+        return (
+            db.query(StoreSubmission)
+            .filter(StoreSubmission.user_id == user_id)
+            .order_by(StoreSubmission.created_at.desc())
+            .first()
+        )
+    except Exception as e:
+        logger.warning(f"Error querying StoreSubmission table: {e}")
+        return None
+
+
+def detect_document_type(
+    filename: Optional[str],
+    declared_content_type: Optional[str],
+    contents: bytes
+) -> tuple[str, str]:
+    """
+    Validasi berkas dokumen (PDF, JPEG, PNG, WebP) berdasarkan magic bytes, ekstensi, dan declared MIME.
+    Mencegah executable, scripts, atau berkas berbahaya disimpan di private storage.
+    """
+    ext = Path(filename or "").suffix.lower()
+
+    # 1. Magic bytes
+    if contents.startswith(b"%PDF"):
+        return "application/pdf", ".pdf"
+    if contents.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if contents.startswith(bytes([137, 80, 78, 71, 13, 10, 26, 10])):
+        return "image/png", ".png"
+    if contents.startswith(b"RIFF") and len(contents) >= 12 and contents[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+
+    # 2. Extension check
+    if ext == ".pdf":
+        return "application/pdf", ".pdf"
+    if ext in [".jpg", ".jpeg"]:
+        return "image/jpeg", ".jpg"
+    if ext == ".png":
+        return "image/png", ".png"
+    if ext == ".webp":
+        return "image/webp", ".webp"
+
+    # 3. Content-Type check
+    ct = (declared_content_type or "").lower().split(";")[0].strip()
+    if ct == "application/pdf":
+        return "application/pdf", ".pdf"
+    if ct in ["image/jpeg", "image/jpg", "image/pjpeg"]:
+        return "image/jpeg", ".jpg"
+    if ct in ["image/png", "image/x-png"]:
+        return "image/png", ".png"
+    if ct == "image/webp":
+        return "image/webp", ".webp"
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Format dokumen tidak valid. Gunakan PDF, JPEG, PNG, atau WebP."
+    )
+
 
 PRICING_PACKAGES = [
     {
@@ -115,6 +193,27 @@ class CreateCampaignRequest(BaseModel):
 
 class ClaimStoreRequest(BaseModel):
     store_id: str = Field(..., description="ID toko yang ingin diklaim/dikelola")
+    applicant_name: Optional[str] = Field(None, description="Nama lengkap pemohon")
+    applicant_phone: Optional[str] = Field(None, description="Nomor kontak yang dapat diverifikasi")
+    applicant_role: Optional[str] = Field(None, description="Peran pemohon (Pemilik, Pengurus Perusahaan, Manajer Cabang)")
+    document_url: Optional[str] = Field(None, description="URL/Path dokumen legalitas usaha (NIB)")
+    store_photo_url: Optional[str] = Field(None, description="URL/Path foto tampak depan toko")
+
+    model_config = {"extra": "ignore"}
+
+
+class SubmitNewStoreRequest(BaseModel):
+    store_name: str = Field(..., min_length=2, description="Nama toko")
+    business_entity_name: Optional[str] = Field(None, description="Nama badan usaha (opsional)")
+    store_address: str = Field(..., min_length=5, description="Alamat lengkap toko")
+    store_category: Optional[str] = Field(None, description="Jenis atau kategori toko (opsional)")
+    applicant_name: str = Field(..., min_length=2, description="Nama lengkap pemohon")
+    applicant_phone: str = Field(..., min_length=8, description="Nomor kontak pemohon")
+    applicant_role: str = Field(..., min_length=2, description="Peran pemohon")
+    document_url: Optional[str] = Field(None, description="URL dokumen legalitas usaha (NIB)")
+    store_photo_url: Optional[str] = Field(None, description="URL foto tampak depan toko")
+
+    model_config = {"extra": "ignore"}
 
 
 class VerifyStoreClaimRequest(BaseModel):
@@ -128,9 +227,36 @@ class RejectStoreClaimRequest(BaseModel):
     reason: Optional[str] = Field(None, description="Alasan penolakan klaim opsional")
 
 
+class VerifyNewStoreRequest(BaseModel):
+    submission_id: str = Field(..., description="ID pengajuan toko baru")
+
+
+class RejectNewStoreRequest(BaseModel):
+    submission_id: str = Field(..., description="ID pengajuan toko baru")
+    reason: Optional[str] = Field(None, description="Alasan penolakan pengajuan")
+
+
+class UserSubmissionItem(BaseModel):
+    id: str
+    submission_type: str  # "claim" atau "new_store"
+    store_id: Optional[str] = None
+    store_name: str
+    store_address: Optional[str] = None
+    store_category: Optional[str] = None
+    business_entity_name: Optional[str] = None
+    applicant_name: Optional[str] = None
+    applicant_phone: Optional[str] = None
+    applicant_role: Optional[str] = None
+    document_url: Optional[str] = None
+    store_photo_url: Optional[str] = None
+    status: str  # "pending", "under_review", "verified", "rejected"
+    rejection_reason: Optional[str] = None
+    created_at: str
+
+
 class PendingStoreClaimItem(BaseModel):
     user_id: str
-    store_id: str
+    store_id: Optional[str] = None
     store_nama: str
     store_alamat: Optional[str] = None
     user_nama: Optional[str] = None
@@ -138,6 +264,15 @@ class PendingStoreClaimItem(BaseModel):
     status: str = "pending"
     created_at: str
     has_verified_owner: bool = False
+    submission_id: Optional[str] = None
+    claim_type: str = "claim"  # "claim" atau "new_store"
+    applicant_name: Optional[str] = None
+    applicant_phone: Optional[str] = None
+    applicant_role: Optional[str] = None
+    business_entity_name: Optional[str] = None
+    store_category: Optional[str] = None
+    document_url: Optional[str] = None
+    store_photo_url: Optional[str] = None
 
 
 class MyStoreResponse(BaseModel):
@@ -150,6 +285,10 @@ class MyStoreResponse(BaseModel):
     store_lng: Optional[float] = None
     rejection_reason: Optional[str] = None
     campaigns: List[HomeBannerItem] = []
+    applicant_name: Optional[str] = None
+    applicant_role: Optional[str] = None
+    document_url: Optional[str] = None
+    store_photo_url: Optional[str] = None
 
 
 @router.get("/pricing-packages", response_model=List[PricingPackageItem], status_code=status.HTTP_200_OK)
@@ -416,6 +555,21 @@ def get_my_store(
     now = datetime.now(timezone.utc)
     owner = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).first()
     if not owner:
+        # Cek apakah pengguna memiliki pengajuan toko baru (Jalur B) di DB yang sedang diproses atau ditolak
+        sub = _get_user_latest_submission(user_id, db)
+        if sub and sub.status != "verified":
+            return MyStoreResponse(
+                is_claimed=False,
+                claim_status=sub.status,
+                store_nama=sub.store_name,
+                store_alamat=sub.store_address,
+                rejection_reason=sub.rejection_reason if sub.status == "rejected" else None,
+                applicant_name=getattr(sub, "applicant_name", None),
+                applicant_role=getattr(sub, "applicant_role", None),
+                document_url=getattr(sub, "document_url", None),
+                store_photo_url=getattr(sub, "store_photo_url", None),
+                campaigns=[]
+            )
         return MyStoreResponse(is_claimed=False, campaigns=[])
 
     store = db.query(Store).filter(Store.id == owner.store_id).first()
@@ -478,6 +632,10 @@ def get_my_store(
         store_lat=store.lat,
         store_lng=store.lng,
         rejection_reason=owner.rejection_reason if owner.status == "rejected" else None,
+        applicant_name=getattr(owner, "applicant_name", None),
+        applicant_role=getattr(owner, "applicant_role", None),
+        document_url=getattr(owner, "document_url", None),
+        store_photo_url=getattr(owner, "store_photo_url", None),
         campaigns=items
     )
 
@@ -515,12 +673,21 @@ def claim_store(
             )
 
         owner = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).with_for_update().first()
+        app_name = payload.applicant_name.strip() if payload.applicant_name and payload.applicant_name.strip() else None
+        app_phone = payload.applicant_phone.strip() if payload.applicant_phone and payload.applicant_phone.strip() else None
+        app_role = payload.applicant_role.strip() if payload.applicant_role and payload.applicant_role.strip() else None
+
         if not owner:
             owner = StoreOwner(
                 user_id=user_id,
                 store_id=store.id,
                 status="pending",
-                rejection_reason=None
+                rejection_reason=None,
+                applicant_name=app_name,
+                applicant_phone=app_phone,
+                applicant_role=app_role,
+                document_url=payload.document_url,
+                store_photo_url=payload.store_photo_url,
             )
             db.add(owner)
         else:
@@ -535,6 +702,11 @@ def claim_store(
             owner.status = "pending"
             owner.verified_at = None
             owner.rejection_reason = None
+            owner.applicant_name = app_name
+            owner.applicant_phone = app_phone
+            owner.applicant_role = app_role
+            owner.document_url = payload.document_url
+            owner.store_photo_url = payload.store_photo_url
 
         db.commit()
         db.refresh(owner)
@@ -563,8 +735,8 @@ def get_pending_store_claims(
     admin_user: dict = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
-    """Daftar klaim yang harus diperiksa oleh admin."""
-    # ponytail: pending filter excludes rejected/verified; add pagination when claims exceed 100/day
+    """Daftar klaim toko terdaftar dan pengajuan toko baru yang harus diperiksa oleh admin."""
+    # 1. Klaim toko terdaftar (StoreOwner)
     rows = (
         db.query(StoreOwner, Store)
         .join(Store, StoreOwner.store_id == Store.id)
@@ -572,7 +744,21 @@ def get_pending_store_claims(
         .order_by(StoreOwner.created_at.asc())
         .all()
     )
-    user_ids = [str(owner.user_id) for owner, _ in rows]
+
+    # 2. Pengajuan toko baru (StoreSubmission)
+    sub_rows = []
+    if _has_store_submissions_table(db):
+        try:
+            sub_rows = (
+                db.query(StoreSubmission)
+                .filter(StoreSubmission.status == "pending")
+                .order_by(StoreSubmission.created_at.asc())
+                .all()
+            )
+        except Exception as e:
+            logger.warning(f"Error reading StoreSubmission table: {e}")
+
+    user_ids = [str(owner.user_id) for owner, _ in rows] + [str(sub.user_id) for sub in sub_rows]
     store_ids = [store.id for _, store in rows]
     users_map = {str(u.id): u for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
 
@@ -589,20 +775,60 @@ def get_pending_store_claims(
         )
         verified_store_ids = {str(so[0]) for so in verified_owners}
 
-    return [
-        PendingStoreClaimItem(
-            user_id=str(owner.user_id),
-            store_id=str(store.id),
-            store_nama=store.nama,
-            store_alamat=store.alamat,
-            user_nama=users_map[str(owner.user_id)].nama if str(owner.user_id) in users_map else None,
-            user_email=users_map[str(owner.user_id)].email if str(owner.user_id) in users_map else None,
-            status=owner.status,
-            created_at=owner.created_at.isoformat() if owner.created_at else "",
-            has_verified_owner=str(store.id) in verified_store_ids,
+    results: List[PendingStoreClaimItem] = []
+
+    # Map existing store claims
+    for owner, store in rows:
+        u = users_map.get(str(owner.user_id))
+        results.append(
+            PendingStoreClaimItem(
+                user_id=str(owner.user_id),
+                store_id=str(store.id),
+                store_nama=store.nama,
+                store_alamat=store.alamat,
+                user_nama=u.nama if u else None,
+                user_email=u.email if u else None,
+                status=owner.status,
+                created_at=owner.created_at.isoformat() if owner.created_at else "",
+                has_verified_owner=str(store.id) in verified_store_ids,
+                submission_id=str(owner.id),
+                claim_type="claim",
+                applicant_name=getattr(owner, "applicant_name", None),
+                applicant_phone=getattr(owner, "applicant_phone", None),
+                applicant_role=getattr(owner, "applicant_role", None),
+                document_url=getattr(owner, "document_url", None),
+                store_photo_url=getattr(owner, "store_photo_url", None),
+            )
         )
-        for owner, store in rows
-    ]
+
+    # Map new store submissions
+    for sub in sub_rows:
+        u = users_map.get(str(sub.user_id))
+        results.append(
+            PendingStoreClaimItem(
+                user_id=str(sub.user_id),
+                store_id=None,
+                store_nama=sub.store_name,
+                store_alamat=sub.store_address,
+                user_nama=u.nama if u else None,
+                user_email=u.email if u else None,
+                status=sub.status,
+                created_at=sub.created_at.isoformat() if sub.created_at else "",
+                has_verified_owner=False,
+                submission_id=str(sub.id),
+                claim_type="new_store",
+                applicant_name=getattr(sub, "applicant_name", None),
+                applicant_phone=getattr(sub, "applicant_phone", None),
+                applicant_role=getattr(sub, "applicant_role", None),
+                business_entity_name=getattr(sub, "business_entity_name", None),
+                store_category=getattr(sub, "store_category", None),
+                document_url=getattr(sub, "document_url", None),
+                store_photo_url=getattr(sub, "store_photo_url", None),
+            )
+        )
+
+    results.sort(key=lambda x: x.created_at)
+    return results
 
 
 @router.post("/reject-claim", response_model=MyStoreResponse, status_code=status.HTTP_200_OK)
@@ -741,6 +967,472 @@ def verify_store_claim(
         raise
 
     return get_my_store(user_id=payload.user_id, db=db)
+
+
+@router.post("/submit-new-store", response_model=UserSubmissionItem, status_code=status.HTTP_201_CREATED)
+def submit_new_store(
+    payload: SubmitNewStoreRequest,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mengajukan pendaftaran toko baru yang belum tersedia di katalog (Jalur B: Pengajuan Toko Baru).
+    Toko baru disimpan dalam antrean pending dan TIDAK langsung aktif di katalog publik.
+    """
+    clean_name = payload.store_name.strip()
+    clean_address = payload.store_address.strip()
+    if not clean_name or len(clean_name) < 2:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nama toko harus diisi minimal 2 karakter.")
+    if not clean_address or len(clean_address) < 5:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Alamat toko harus diisi minimal 5 karakter.")
+
+    # 1. Cek ketersediaan tabel store_submissions di database
+    if not _has_store_submissions_table(db):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Fitur pengajuan toko baru belum tersedia karena skema database belum diperbarui. Silakan hubungi administrator."
+        )
+
+    # 2. Cek duplikasi di katalog toko publik
+    existing_store = (
+        db.query(Store)
+        .filter(
+            func.lower(Store.nama) == clean_name.lower(),
+            func.lower(Store.alamat) == clean_address.lower()
+        )
+        .first()
+    )
+    if existing_store:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Toko dengan nama dan alamat serupa sudah terdaftar di katalog. Silakan gunakan jalur 'Klaim Toko Terdaftar' untuk mengklaim toko ini."
+        )
+
+    # 3. Cek pengajuan pending duplikat oleh user yang sama di database
+    existing_sub = (
+        db.query(StoreSubmission)
+        .filter(
+            StoreSubmission.user_id == user_id,
+            StoreSubmission.status == "pending",
+            func.lower(StoreSubmission.store_name) == clean_name.lower()
+        )
+        .first()
+    )
+    if existing_sub:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Anda sudah memiliki pengajuan aktif untuk toko ini yang sedang menunggu pemeriksaan admin."
+        )
+
+    # 4. Cek apakah user sudah memiliki toko terverifikasi
+    verified_owner = (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.user_id == user_id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None)
+        )
+        .first()
+    )
+    if verified_owner:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Akun ini sudah memiliki toko terverifikasi. Satu akun hanya dapat mengelola satu toko mitra."
+        )
+
+    sub_id = str(uuid.uuid4())
+    cat = payload.store_category.strip() if payload.store_category and payload.store_category.strip() else None
+
+    sub = StoreSubmission(
+        id=sub_id,
+        user_id=user_id,
+        store_name=clean_name,
+        business_entity_name=payload.business_entity_name.strip() if payload.business_entity_name else None,
+        store_address=clean_address,
+        store_category=cat or "Supermarket",
+        applicant_name=payload.applicant_name.strip(),
+        applicant_phone=payload.applicant_phone.strip(),
+        applicant_role=payload.applicant_role.strip(),
+        document_url=payload.document_url,
+        store_photo_url=payload.store_photo_url,
+        status="pending",
+    )
+    db.add(sub)
+    try:
+        db.commit()
+        db.refresh(sub)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error saving store submission: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Gagal menyimpan pengajuan toko.")
+
+    return UserSubmissionItem(
+        id=sub_id,
+        submission_type="new_store",
+        store_id=None,
+        store_name=clean_name,
+        store_address=clean_address,
+        store_category=cat,
+        business_entity_name=payload.business_entity_name.strip() if payload.business_entity_name else None,
+        applicant_name=payload.applicant_name.strip(),
+        applicant_phone=payload.applicant_phone.strip(),
+        applicant_role=payload.applicant_role.strip(),
+        document_url=payload.document_url,
+        store_photo_url=payload.store_photo_url,
+        status="pending",
+        rejection_reason=None,
+        created_at=sub.created_at.isoformat() if sub.created_at else "",
+    )
+
+
+@router.get("/my-submissions", response_model=List[UserSubmissionItem], status_code=status.HTTP_200_OK)
+def get_my_submissions(
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Mengambil riwayat seluruh pengajuan klaim dan pendaftaran toko milik pengguna."""
+    items: List[UserSubmissionItem] = []
+
+    # 1. Existing store claims (StoreOwner) dari database
+    owners = (
+        db.query(StoreOwner, Store)
+        .join(Store, StoreOwner.store_id == Store.id)
+        .filter(StoreOwner.user_id == user_id)
+        .all()
+    )
+    for owner, store in owners:
+        items.append(
+            UserSubmissionItem(
+                id=str(owner.id),
+                submission_type="claim",
+                store_id=str(store.id),
+                store_name=store.nama,
+                store_address=store.alamat,
+                applicant_name=getattr(owner, "applicant_name", None),
+                applicant_phone=getattr(owner, "applicant_phone", None),
+                applicant_role=getattr(owner, "applicant_role", None),
+                document_url=getattr(owner, "document_url", None),
+                store_photo_url=getattr(owner, "store_photo_url", None),
+                status=owner.status,
+                rejection_reason=owner.rejection_reason if owner.status == "rejected" else None,
+                created_at=owner.created_at.isoformat() if owner.created_at else "",
+            )
+        )
+
+    # 2. New store submissions (StoreSubmission) dari database jika tabel tersedia
+    if _has_store_submissions_table(db):
+        try:
+            subs = (
+                db.query(StoreSubmission)
+                .filter(StoreSubmission.user_id == user_id)
+                .all()
+            )
+            for sub in subs:
+                items.append(
+                    UserSubmissionItem(
+                        id=str(sub.id),
+                        submission_type="new_store",
+                        store_id=str(sub.created_store_id) if sub.created_store_id else None,
+                        store_name=sub.store_name,
+                        store_address=sub.store_address,
+                        store_category=sub.store_category,
+                        business_entity_name=sub.business_entity_name,
+                        applicant_name=sub.applicant_name,
+                        applicant_phone=sub.applicant_phone,
+                        applicant_role=sub.applicant_role,
+                        document_url=sub.document_url,
+                        store_photo_url=sub.store_photo_url,
+                        status=sub.status,
+                        rejection_reason=sub.rejection_reason if sub.status == "rejected" else None,
+                        created_at=sub.created_at.isoformat() if sub.created_at else "",
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"Error querying StoreSubmission table: {e}")
+
+    items.sort(key=lambda x: x.created_at, reverse=True)
+    return items
+
+
+@router.post("/verify-new-store", status_code=status.HTTP_200_OK)
+def verify_new_store_submission(
+    payload: VerifyNewStoreRequest,
+    admin_user: dict = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Setujui pengajuan toko baru, aktifkan toko ke katalog publik, dan berikan akses pemilik terverifikasi."""
+    if not _has_store_submissions_table(db):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Fitur verifikasi toko baru belum tersedia karena skema database belum diperbarui."
+        )
+    try:
+        sub = db.query(StoreSubmission).filter(StoreSubmission.id == payload.submission_id).with_for_update().first()
+        if not sub:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pengajuan toko baru tidak ditemukan.")
+
+        if sub.status == "verified":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pengajuan toko baru sudah dalam status terverifikasi.")
+        if sub.status == "rejected":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pengajuan toko yang sudah ditolak tidak dapat langsung disetujui.")
+
+        clean_name = sub.store_name.strip()
+        clean_address = sub.store_address.strip()
+
+        # 1. Cek apakah toko dengan nama dan alamat serupa sudah dibuat selama pengajuan berlangsung
+        store = (
+            db.query(Store)
+            .filter(
+                func.lower(Store.nama) == clean_name.lower(),
+                func.lower(Store.alamat) == clean_address.lower()
+            )
+            .with_for_update()
+            .first()
+        )
+        if not store:
+            store = Store(
+                id=str(uuid.uuid4()),
+                nama=clean_name,
+                alamat=clean_address,
+                lat=-7.7829,
+                lng=110.4083,
+            )
+            db.add(store)
+            db.flush()
+
+        now = datetime.now(timezone.utc)
+        # 2. Cek apakah user sudah memiliki owner record
+        owner = db.query(StoreOwner).filter(StoreOwner.user_id == sub.user_id).with_for_update().first()
+        if not owner:
+            owner = StoreOwner(
+                id=str(uuid.uuid4()),
+                user_id=sub.user_id,
+                store_id=store.id,
+                status="verified",
+                verified_at=now,
+                rejection_reason=None
+            )
+            db.add(owner)
+        else:
+            owner.store_id = store.id
+            owner.status = "verified"
+            owner.verified_at = now
+            owner.rejection_reason = None
+
+        # 3. Auto-reject competing pending submissions for same store
+        competing = (
+            db.query(StoreSubmission)
+            .filter(
+                StoreSubmission.id != payload.submission_id,
+                StoreSubmission.status == "pending",
+                func.lower(StoreSubmission.store_name) == clean_name.lower()
+            )
+            .with_for_update()
+            .all()
+        )
+        for c in competing:
+            c.status = "rejected"
+            c.rejection_reason = "Toko telah disetujui dan diverifikasi untuk mitra lain."
+            c.reviewed_at = now
+            c.reviewed_by = admin_user.get("user_id")
+
+        sub.status = "verified"
+        sub.created_store_id = store.id
+        sub.reviewed_at = now
+        sub.reviewed_by = admin_user.get("user_id")
+
+        db.commit()
+        return {
+            "status": "success",
+            "message": f"Toko '{store.nama}' berhasil diverifikasi dan ditambahkan ke katalog.",
+            "store_id": str(store.id),
+            "store_nama": store.nama
+        }
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Toko sudah memiliki pemilik terverifikasi.")
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error in verify_new_store_submission: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Terjadi kesalahan pada server saat menyetujui toko baru.")
+
+
+@router.post("/reject-new-store", status_code=status.HTTP_200_OK)
+def reject_new_store_submission(
+    payload: RejectNewStoreRequest,
+    admin_user: dict = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Tolak pengajuan toko baru oleh admin dengan alasan penolakan."""
+    if not _has_store_submissions_table(db):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Fitur penolakan toko baru belum tersedia karena skema database belum diperbarui."
+        )
+    try:
+        clean_reason = payload.reason.strip() if payload.reason and payload.reason.strip() else None
+        now = datetime.now(timezone.utc)
+        sub = db.query(StoreSubmission).filter(StoreSubmission.id == payload.submission_id).with_for_update().first()
+        if not sub:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pengajuan toko baru tidak ditemukan.")
+
+        if sub.status == "verified":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pengajuan toko yang sudah terverifikasi tidak dapat ditolak.")
+        if sub.status == "rejected":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pengajuan toko sudah dalam status ditolak.")
+
+        sub.status = "rejected"
+        sub.rejection_reason = clean_reason
+        sub.reviewed_at = now
+        sub.reviewed_by = admin_user.get("user_id")
+        db.commit()
+
+        return {"status": "success", "message": "Pengajuan toko baru telah ditolak.", "rejection_reason": clean_reason}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error in reject_new_store_submission: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Terjadi kesalahan pada server saat menolak pengajuan toko.")
+
+
+@router.post("/upload-claim-document", status_code=status.HTTP_200_OK)
+async def upload_claim_document(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Mengunggah dokumen legalitas usaha (NIB, dsb) secara aman ke private storage.
+    Hanya menerima berkas PDF atau gambar scan (JPEG, PNG, WebP) maks 5MB.
+    """
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Berkas dokumen kosong.")
+
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ukuran file terlalu besar. Maksimum 5MB.")
+
+    content_type, ext = detect_document_type(
+        filename=file.filename,
+        declared_content_type=file.content_type,
+        contents=contents
+    )
+
+    filename = f"doc_{user_id}_{uuid.uuid4().hex[:16]}{ext}"
+    target_path = PRIVATE_DOCS_DIR / filename
+    with open(target_path, "wb") as f:
+        f.write(contents)
+
+    return {"document_url": f"/ads/documents/{filename}", "filename": filename}
+
+
+@router.post("/upload-claim-photo", status_code=status.HTTP_200_OK)
+async def upload_claim_photo(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Mengunggah foto tampak depan toko yang memperlihatkan papan nama toko.
+    """
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Berkas foto kosong.")
+
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ukuran file terlalu besar. Maksimum 5MB.")
+
+    content_type, ext = detect_image_type(
+        filename=file.filename,
+        declared_content_type=file.content_type,
+        contents=contents
+    )
+
+    filename = f"claim_photo_{uuid.uuid4().hex}{ext}"
+    try:
+        supabase.storage.from_(SUPABASE_BUCKET).upload(
+            filename,
+            contents,
+            {"content-type": content_type, "upsert": "true"}
+        )
+        photo_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename).rstrip("?")
+        return {"photo_url": photo_url}
+    except Exception as e:
+        logger.warning(f"Failed to upload photo to Supabase storage: {e}. Using fallback path.")
+        return {"photo_url": f"https://images.unsplash.com/photo-1578916171728-46686eac8d58?auto=format&fit=crop&w=800&q=80"}
+
+
+@router.get("/documents/{filename}")
+def get_private_document(
+    filename: str,
+    user_id: str = Depends(get_current_user),
+    profile: dict = Depends(get_current_user_profile),
+    db: Session = Depends(get_db)
+):
+    """
+    Mengunduh dokumen legalitas dari private storage secara aman.
+    Akses hanya diizinkan untuk admin atau pemohon pemilik dokumen tersebut.
+    """
+    safe_filename = Path(filename).name
+    if safe_filename != filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nama berkas tidak valid.")
+
+    file_path = PRIVATE_DOCS_DIR / safe_filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dokumen tidak ditemukan.")
+
+    # Cek hak akses: Admin selalu diizinkan
+    is_admin = profile.get("role") == "admin"
+    if not is_admin:
+        allowed = False
+        # 1. Dokumen yang diunggah oleh user ini sendiri
+        if safe_filename.startswith(f"doc_{user_id}_"):
+            allowed = True
+
+        # 2. Cek klaim toko user jika kolom document_url tersedia
+        if not allowed:
+            user_owners = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).all()
+            for o in user_owners:
+                if safe_filename in (getattr(o, "document_url", None) or ""):
+                    allowed = True
+                    break
+
+        # 3. Cek pengajuan toko baru user dari DB
+        if not allowed and _has_store_submissions_table(db):
+            try:
+                sub = (
+                    db.query(StoreSubmission)
+                    .filter(
+                        StoreSubmission.user_id == user_id,
+                        StoreSubmission.document_url.like(f"%{safe_filename}%")
+                    )
+                    .first()
+                )
+                if sub:
+                    allowed = True
+            except Exception:
+                pass
+
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Akses ditolak: Anda tidak memiliki izin untuk melihat dokumen ini."
+            )
+
+    media_type = "application/pdf" if safe_filename.endswith(".pdf") else "image/jpeg"
+    if safe_filename.endswith(".png"):
+        media_type = "image/png"
+    elif safe_filename.endswith(".webp"):
+        media_type = "image/webp"
+
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        headers={"Cache-Control": "private, no-store"}
+    )
 
 
 @router.post("/upload-banner", status_code=status.HTTP_200_OK)

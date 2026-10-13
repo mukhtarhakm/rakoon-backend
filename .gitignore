@@ -54,3 +54,6 @@ Thumbs.db
 static/uploads/products/*
 !static/uploads/products/.gitkeep
 
+# Private storage
+private_storage/
+

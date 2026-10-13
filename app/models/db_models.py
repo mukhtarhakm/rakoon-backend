@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Optional
 import uuid
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uuid, Index, Numeric, text
 from sqlalchemy.orm import relationship
@@ -89,8 +90,37 @@ class StoreOwner(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     verified_at = Column(DateTime(timezone=True), nullable=True)
     rejection_reason = Column(String, nullable=True)
+    applicant_name = Column(String, nullable=True)
+    applicant_phone = Column(String, nullable=True)
+    applicant_role = Column(String, nullable=True)
+    document_url = Column(String, nullable=True)
+    store_photo_url = Column(String, nullable=True)
 
     store = relationship("Store")
+
+
+class StoreSubmission(Base):
+    __tablename__ = "store_submissions"
+
+    id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Uuid(as_uuid=False), nullable=False, index=True)
+    store_name = Column(String, nullable=False)
+    business_entity_name = Column(String, nullable=True)
+    store_address = Column(String, nullable=False)
+    store_category = Column(String, default="Supermarket", nullable=True)
+    applicant_name = Column(String, nullable=False)
+    applicant_phone = Column(String, nullable=False)
+    applicant_role = Column(String, nullable=False)
+    document_url = Column(String, nullable=True)
+    store_photo_url = Column(String, nullable=True)
+    status = Column(String, default="pending", nullable=False, index=True)  # pending, under_review, verified, rejected
+    rejection_reason = Column(String, nullable=True)
+    created_store_id = Column(Uuid(as_uuid=False), ForeignKey("stores.id"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(String, nullable=True)
+
+    created_store = relationship("Store")
 
 
 class AdCampaign(Base):
