@@ -344,6 +344,7 @@ def get_recent_scans(
                 store_name=store_name,
                 timestamp=ts,
                 product_count=product_count or 0,
+                store_address=store.alamat if store else None,
             )
         )
     return results
@@ -406,6 +407,7 @@ def get_scan_session_detail(
         timestamp=ts,
         product_count=len(items),
         items=items,
+        store_address=store.alamat if store else None,
     )
 
 

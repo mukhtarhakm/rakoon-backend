@@ -96,6 +96,7 @@ class RecentScanItem(BaseModel):
     store_name: Optional[str] = Field(None, description="Nama toko")
     timestamp: datetime = Field(..., description="Waktu sesi scan")
     product_count: int = Field(..., description="Jumlah produk yang dipindai dalam sesi")
+    store_address: Optional[str] = Field(None, description="Alamat toko jika tersedia")
 
     model_config = {"from_attributes": True}
 
@@ -118,6 +119,7 @@ class ScanSessionDetailResponse(BaseModel):
     timestamp: datetime = Field(..., description="Waktu sesi scan")
     product_count: int = Field(..., description="Jumlah total produk dalam sesi")
     items: List[ScanSessionProductItem] = Field(default_factory=list, description="Daftar produk dalam sesi scan")
+    store_address: Optional[str] = Field(None, description="Alamat toko jika tersedia")
 
     model_config = {"from_attributes": True}
 
