@@ -4,11 +4,12 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models.db_models import Store
+from app.models.db_models import Store, PriceEntry
 from pydantic import BaseModel, Field
 
 # Setup logger
@@ -24,6 +25,7 @@ class NearbyStoreItem(BaseModel):
     lng: float = Field(..., description="Longitude toko")
     jarak_km: float = Field(..., description="Jarak dari titik user dalam km")
     alamat: Optional[str] = Field(None, description="Alamat toko")
+    total_products: Optional[int] = Field(0, description="Jumlah harga produk tercatat")
 
 class NearbyStoresResponse(BaseModel):
     stores: List[NearbyStoreItem] = Field(default_factory=list, description="Daftar toko terdekat")
@@ -98,20 +100,40 @@ def get_nearby_stores(
     # Ambil toko kandidat dari database lokal
     db_stores = get_candidate_stores(db, lat, lng, radius_km)
     
-    results = []
+    candidate_matches = []
     for store in db_stores:
         dist = haversine_distance(lat, lng, store.lat, store.lng)
         if dist <= radius_km:
-            results.append(
-                NearbyStoreItem(
-                    store_id=str(store.id),
-                    nama=store.nama,
-                    lat=store.lat,
-                    lng=store.lng,
-                    jarak_km=dist,
-                    alamat=store.alamat
-                )
+            candidate_matches.append((store, dist))
+
+    # Agregasi jumlah produk dengan harga tercatat per toko
+    store_ids = [str(store.id) for store, _ in candidate_matches]
+    counts_by_store = {}
+    if store_ids:
+        counts_query = (
+            db.query(PriceEntry.store_id, func.count(func.distinct(PriceEntry.product_id)))
+            .filter(
+                PriceEntry.store_id.in_(store_ids),
+                PriceEntry.status_verifikasi != "rejected"
             )
+            .group_by(PriceEntry.store_id)
+            .all()
+        )
+        counts_by_store = {str(sid): count for sid, count in counts_query}
+
+    results = []
+    for store, dist in candidate_matches:
+        results.append(
+            NearbyStoreItem(
+                store_id=str(store.id),
+                nama=store.nama,
+                lat=store.lat,
+                lng=store.lng,
+                jarak_km=dist,
+                alamat=store.alamat,
+                total_products=counts_by_store.get(str(store.id), 0)
+            )
+        )
             
     # Urutkan hasil berdasarkan jarak terdekat
     results.sort(key=lambda x: x.jarak_km)
