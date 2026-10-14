@@ -454,9 +454,6 @@ def get_home_banners(
     """
     now = datetime.now(timezone.utc)
 
-    # Pastikan data demo terinisialisasi jika tabel masih kosong
-    _ensure_seed_campaigns(db)
-
     # Ambil kampanye yang berstatus active
     all_active = (
         db.query(AdCampaign)

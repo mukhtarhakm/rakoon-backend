@@ -1164,27 +1164,28 @@ class TestAdsModule(unittest.TestCase):
             else:
                 os.environ.pop("ENVIRONMENT", None)
 
-    def test_home_banners_endpoint_auto_seeds_and_returns_when_demo_allowed(self):
-        """GET /ads/home-banners auto-seeds demo data and returns them when ALLOW_DEMO_ADS=true and include_demo=true."""
+    def test_home_banners_get_never_writes_db_even_when_demo_flags_are_on(self):
+        """GET /ads/home-banners hanya membaca: tidak ada seed demo, toko baru, maupun commit (P4-06)."""
+        from sqlalchemy.orm import Session
         old_allow = os.environ.get("ALLOW_DEMO_ADS")
         old_env = os.environ.get("ENVIRONMENT")
+        stores_before = self.db.query(Store).count()
+        campaigns_before = self.db.query(AdCampaign).count()
+        original_commit = Session.commit
+        commits = []
+
+        def spy(session_self):
+            commits.append(1)
+            return original_commit(session_self)
+
         try:
             os.environ["ALLOW_DEMO_ADS"] = "true"
             os.environ["ENVIRONMENT"] = "development"
-
-            # 1. Request with include_demo=true returns seeded demo campaigns
-            res = self.client.get("/ads/home-banners?lat=-7.7589&lng=110.4011&radius_km=15&include_demo=true")
-            self.assertEqual(res.status_code, 200)
-            data = res.json()
-            self.assertGreaterEqual(len(data), 1)
-            for item in data:
-                self.assertEqual(item["payment_status"], "demo")
-                self.assertEqual(item["payment_method"], "DEMO")
-
-            # 2. Standard request without include_demo excludes demo campaigns (returns empty)
-            std_res = self.client.get("/ads/home-banners?lat=-7.7589&lng=110.4011&radius_km=15")
-            self.assertEqual(std_res.status_code, 200)
-            self.assertEqual(std_res.json(), [])
+            with patch.object(Session, "commit", spy):
+                for query in ("", "&include_demo=true"):
+                    res = self.client.get(f"/ads/home-banners?lat=-7.7589&lng=110.4011&radius_km=15{query}")
+                    self.assertEqual(res.status_code, 200)
+                    self.assertEqual(res.json(), [])
         finally:
             if old_allow is not None:
                 os.environ["ALLOW_DEMO_ADS"] = old_allow
@@ -1194,6 +1195,12 @@ class TestAdsModule(unittest.TestCase):
                 os.environ["ENVIRONMENT"] = old_env
             else:
                 os.environ.pop("ENVIRONMENT", None)
+
+        self.assertEqual(commits, [])
+        self.db.expire_all()
+        self.assertEqual(self.db.query(AdCampaign).count(), campaigns_before)
+        self.assertEqual(self.db.query(Store).count(), stores_before)
+
 
 if __name__ == "__main__":
     unittest.main()
