@@ -202,6 +202,11 @@ def get_price_history_v1(
             limit=limit,
             offset=offset,
         )
+    except price_history_service.DateRangeError as de:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(de),
+        )
     except ValueError as ve:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -20,6 +20,19 @@ from app.models.db_models import PriceEntry, Product, Store
 from app.models.schemas import PriceHistoryItem, PriceHistoryResponse, PriceTrendPoint, VerificationStatus
 
 
+# Hari pada grafik tren dihitung menurut WIB (UTC+7), bukan UTC.
+WIB = timezone(timedelta(hours=7))
+
+
+class DateRangeError(ValueError):
+    """Rentang tanggal tidak valid (mis. start_date setelah end_date); dipetakan ke HTTP 400."""
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Timestamp naive (dari SQLite) dianggap UTC; yang beroffset dikonversi ke UTC."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
 class DateRange(str, Enum):
     """Enum rentang tanggal yang bisa dipilih user (FR-3.3)."""
 
@@ -38,12 +51,17 @@ def _resolve_date_window(
     Resolusi rentang tanggal.
 
     Prioritas:
-    1. start_date / end_date eksplisit (jika keduanya disediakan).
+    1. start_date dan/atau end_date eksplisit: masing-masing berlaku sendiri (satu sisi saja tidak diabaikan)
+       dan mengalahkan preset; start_date setelah end_date -> DateRangeError.
     2. range_enum (1m / 3m / 6m / all).
     3. Tidak ada filter → kembalikan (None, None) → semua data.
     """
-    if start_date and end_date:
-        return start_date, end_date
+    if start_date or end_date:
+        start = _as_utc(start_date) if start_date else None
+        end = _as_utc(end_date) if end_date else None
+        if start and end and start > end:
+            raise DateRangeError("start_date tidak boleh setelah end_date.")
+        return start, end
 
     if range_enum and range_enum != DateRange.ALL:
         now = datetime.now(timezone.utc)
@@ -67,7 +85,7 @@ def calculate_price_trend(items: List[PriceHistoryItem]) -> List[PriceTrendPoint
     ------------------------------------------------------------------
     1. Pengelompokan (Grouping):
        Data dikelompokkan berdasarkan pasangan (tanggal, store_id) di mana tanggal
-       diformat sebagai `YYYY-MM-DD` dari field `recorded_at`.
+       diformat sebagai `YYYY-MM-DD` menurut WIB (UTC+7) dari field `recorded_at`.
     2. Agregasi Harga (Multi-entry Strategy):
        Jika terdapat beberapa entri harga untuk toko yang sama pada hari yang sama
        (misal dari scan beberapa user), harga dihitung berdasarkan RATA-RATA (mean)
@@ -91,8 +109,8 @@ def calculate_price_trend(items: List[PriceHistoryItem]) -> List[PriceTrendPoint
 
     grouped: dict[tuple[str, str], list[int]] = {}
     for item in items:
-        date_str = item.recorded_at.strftime("%Y-%m-%d")
-        key = (date_str, item.store_id)
+        date_str = _as_utc(item.recorded_at).astimezone(WIB).strftime("%Y-%m-%d")
+        key = (date_str, str(item.store_id))
         if key not in grouped:
             grouped[key] = []
         grouped[key].append(item.harga)
