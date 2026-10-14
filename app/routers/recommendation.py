@@ -14,6 +14,7 @@ from app.models.schemas import (
     validate_category,
 )
 from app.database import get_db
+from app.services.errors import safe_error
 from app.models.db_models import Product, PriceEntry, Store
 from sqlalchemy.orm import Session
 
@@ -293,10 +294,12 @@ def evaluate_recommendation(payload: RecommendationRequest):
     try:
         return evaluate_best_value_logic(payload.items)
     except Exception as e:
-        logger.error(f"Error during recommendation evaluation: {str(e)}")
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat memproses rekomendasi.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Terjadi kesalahan saat memproses rekomendasi: {str(e)}"
+            log_prefix="Error during recommendation evaluation",
         )
 
 

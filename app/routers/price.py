@@ -1,4 +1,5 @@
 import re
+import logging
 from fastapi import APIRouter, HTTPException, Query, status, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -11,7 +12,9 @@ from app.dependencies import get_current_user
 from app.services import price_history_service
 from app.services.price_history_service import DateRange
 from app.routers.stores import get_nearby_stores
+from app.services.errors import safe_error
 
+logger = logging.getLogger("rakoon_backend.price")
 router = APIRouter()
 
 def parse_product_id(product_id: str) -> Union[int, str]:
@@ -82,9 +85,11 @@ def create_price_entry(
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat menyimpan data harga.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Terjadi kesalahan saat menyimpan data harga: {str(e)}"
         )
 
 
@@ -197,9 +202,11 @@ def get_price_history_v1(
             detail=str(ve),
         )
     except Exception as e:
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat mengambil riwayat harga.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Terjadi kesalahan saat mengambil riwayat harga: {str(e)}",
         )
 
 
@@ -247,9 +254,11 @@ def get_price_history(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat mengambil riwayat harga.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Terjadi kesalahan saat mengambil riwayat harga: {str(e)}"
         )
 
 @router.get("/compare/{product_id}", response_model=PriceCompareResponse)
@@ -387,7 +396,9 @@ def get_price_comparison(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat memproses perbandingan harga.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Terjadi kesalahan saat memproses perbandingan harga: {str(e)}"
         )

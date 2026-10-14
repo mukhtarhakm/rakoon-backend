@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.db_models import Store, PriceEntry
+from app.services.errors import safe_error
 from pydantic import BaseModel, Field
 
 # Setup logger
@@ -244,9 +245,11 @@ def create_store(
         return StoreCreateResponse(store_id=new_store.id)
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to create store manually: {str(e)}")
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Gagal menyimpan data toko ke database.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Gagal menyimpan data toko ke database: {str(e)}"
+            log_prefix="Failed to create store manually",
         )
 

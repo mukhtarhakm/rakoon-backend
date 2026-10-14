@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.database import get_db
+from app.services.errors import safe_error
 from app.models.db_models import Product, PriceEntry, Store
 from app.models.schemas import (
     BudgetRecommendRequest,
@@ -297,8 +298,10 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error during budget shopping recommendation: {str(e)}")
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat memproses rekomendasi budget shopping.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Terjadi kesalahan saat memproses rekomendasi budget shopping: {str(e)}"
+            log_prefix="Error during budget shopping recommendation",
         )

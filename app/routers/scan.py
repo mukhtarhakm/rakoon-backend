@@ -28,6 +28,7 @@ from app.models.schemas import (
 from app.models.db_models import Product, PriceEntry, Store, ScanSession
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.services.errors import safe_error
 from app.services.vision_service import process_shelf_image
 
 
@@ -191,10 +192,12 @@ async def scan_shelf_photo(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error reading file content: {str(e)}")
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Gagal membaca file foto.",
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Gagal membaca file foto: {str(e)}"
+            log_prefix="Error reading file content",
         )
 
     # 3. Menentukan MIME type
@@ -299,10 +302,12 @@ def confirm_scan_results(
         
     except Exception as e:
         db.rollback()
-        logger.error(f"Error during scan confirmation: {str(e)}")
-        raise HTTPException(
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat menyimpan konfirmasi scan.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Terjadi kesalahan saat menyimpan konfirmasi: {str(e)}"
+            log_prefix="Error during scan confirmation",
         )
 
 

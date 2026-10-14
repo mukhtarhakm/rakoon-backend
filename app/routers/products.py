@@ -9,6 +9,7 @@ from app.models.db_models import Product
 from app.models.schemas import ProductCategoryType, ProductPhotoUpdate
 from app.dependencies import get_current_admin_user
 from app.services.storage_upload import upload_image
+from app.services.errors import safe_error
 
 from uuid import UUID
 
@@ -196,9 +197,19 @@ def update_product_photo_url(
         )
 
     product.foto_url = payload.foto_url.strip()
-    db.commit()
-    db.refresh(product)
-    return product
+    try:
+        db.commit()
+        db.refresh(product)
+        return product
+    except Exception as e:
+        db.rollback()
+        raise safe_error(
+            logger,
+            e,
+            "Gagal memperbarui foto produk.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            log_prefix="Error updating product photo URL",
+        )
 
 
 @router.post("/{product_id}/upload-photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
@@ -226,6 +237,16 @@ async def upload_product_photo(
         )
 
     product.foto_url = await upload_image(file)
-    db.commit()
-    db.refresh(product)
-    return product
+    try:
+        db.commit()
+        db.refresh(product)
+        return product
+    except Exception as e:
+        db.rollback()
+        raise safe_error(
+            logger,
+            e,
+            "Gagal menyimpan foto produk ke database.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            log_prefix="Error saving product photo to database",
+        )
