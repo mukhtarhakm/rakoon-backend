@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import price, scan, stores, products, recommendation, budget_shopping, auth, ads, health
 
@@ -16,6 +16,15 @@ app.add_middleware(
     allow_methods=["*"],  # Mengizinkan semua HTTP methods (GET, POST, dll)
     allow_headers=["*"],  # Mengizinkan semua HTTP headers
 )
+
+@app.middleware("http")
+async def add_static_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static"):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
 
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
