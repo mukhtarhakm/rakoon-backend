@@ -1202,5 +1202,128 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(self.db.query(Store).count(), stores_before)
 
 
+    def test_update_active_campaign_success(self):
+        """Owner can update title and banner_url of an active campaign."""
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/verify-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+        })
+        create_res = self.client.post("/ads/campaigns", json={
+            "store_id": str(self.store.id),
+            "title": "Judul Lama",
+            "banner_url": "https://example.com/old.png",
+            "duration_days": 7,
+        })
+        cid = create_res.json()["id"]
+
+        update_res = self.client.patch(f"/ads/campaigns/{cid}", json={
+            "title": "Judul Baru Setelah Edit",
+            "banner_url": "https://example.com/new.png",
+        })
+        self.assertEqual(update_res.status_code, 200)
+        self.assertEqual(update_res.json()["title"], "Judul Baru Setelah Edit")
+        self.assertEqual(update_res.json()["banner_url"], "https://example.com/new.png")
+
+    def test_update_campaign_forbidden_for_other_user(self):
+        """Non-owner cannot update campaign."""
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/verify-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+        })
+        create_res = self.client.post("/ads/campaigns", json={
+            "store_id": str(self.store.id),
+            "title": "Judul Toko A",
+            "banner_url": "https://example.com/a.png",
+            "duration_days": 3,
+        })
+        cid = create_res.json()["id"]
+
+        app.dependency_overrides[get_current_user] = lambda: OTHER_USER_ID
+        update_res = self.client.patch(f"/ads/campaigns/{cid}", json={
+            "title": "Hacked Title",
+        })
+        self.assertEqual(update_res.status_code, 403)
+
+    def test_update_expired_campaign_fails(self):
+        """Updating an expired campaign returns 400 indicating renewal is required."""
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/verify-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+        })
+        create_res = self.client.post("/ads/campaigns", json={
+            "store_id": str(self.store.id),
+            "title": "Promo Kadaluarsa",
+            "banner_url": "https://example.com/exp.png",
+            "duration_days": 3,
+        })
+        cid = create_res.json()["id"]
+
+        camp = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        camp.status = "expired"
+        camp.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        self.db.commit()
+
+        update_res = self.client.patch(f"/ads/campaigns/{cid}", json={
+            "title": "Judul Baru Pada Iklan Expired",
+        })
+        self.assertEqual(update_res.status_code, 400)
+        self.assertIn("Masa tayang iklan telah berakhir", update_res.json()["detail"])
+
+    def test_delete_campaign_success(self):
+        """Owner can delete their campaign (soft-delete, non-refundable)."""
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/verify-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+        })
+        create_res = self.client.post("/ads/campaigns", json={
+            "store_id": str(self.store.id),
+            "title": "Promo Akan Dihapus",
+            "banner_url": "https://example.com/delete_me.png",
+            "duration_days": 3,
+        })
+        cid = create_res.json()["id"]
+
+        del_res = self.client.delete(f"/ads/campaigns/{cid}")
+        self.assertEqual(del_res.status_code, 200)
+        self.assertEqual(del_res.json()["status"], "success")
+
+        # Database campaign status must be deleted
+        camp = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.assertEqual(camp.status, "deleted")
+
+        # Excluded from my-store
+        store_res = self.client.get("/ads/my-store")
+        self.assertEqual(store_res.status_code, 200)
+        campaign_ids = [c["id"] for c in store_res.json().get("campaigns", [])]
+        self.assertNotIn(cid, campaign_ids)
+
+        # Deleting again returns 404
+        del_again = self.client.delete(f"/ads/campaigns/{cid}")
+        self.assertEqual(del_again.status_code, 404)
+
+    def test_delete_campaign_forbidden_for_other_user(self):
+        """Non-owner cannot delete campaign."""
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/verify-claim", json={
+            "user_id": TEST_USER_ID,
+            "store_id": str(self.store.id),
+        })
+        create_res = self.client.post("/ads/campaigns", json={
+            "store_id": str(self.store.id),
+            "title": "Promo Tetangga",
+            "banner_url": "https://example.com/neighbor.png",
+            "duration_days": 3,
+        })
+        cid = create_res.json()["id"]
+
+        app.dependency_overrides[get_current_user] = lambda: OTHER_USER_ID
+        del_res = self.client.delete(f"/ads/campaigns/{cid}")
+        self.assertEqual(del_res.status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main()

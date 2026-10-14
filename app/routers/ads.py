@@ -139,6 +139,19 @@ class CreateCampaignRequest(BaseModel):
     model_config = {"extra": "ignore"}
 
 
+class UpdateCampaignRequest(BaseModel):
+    title: Optional[str] = Field(None, min_length=3, description="Judul promo atau headline baru")
+    banner_url: Optional[str] = Field(None, description="URL gambar flyer promo baru")
+
+    model_config = {"extra": "ignore"}
+
+
+class RenewCampaignRequest(BaseModel):
+    duration_days: Optional[int] = Field(None, description="Pilihan durasi perpanjangan: 3, 7, atau 14 hari")
+
+    model_config = {"extra": "ignore"}
+
+
 class ClaimStoreRequest(BaseModel):
     store_id: str = Field(..., description="ID toko yang ingin diklaim/dikelola")
     applicant_name: Optional[str] = Field(None, description="Nama lengkap pemohon")
@@ -584,7 +597,7 @@ def get_my_store(
 
     campaigns = (
         db.query(AdCampaign)
-        .filter(AdCampaign.store_id == store.id)
+        .filter(AdCampaign.store_id == store.id, AdCampaign.status != "deleted")
         .order_by(AdCampaign.created_at.desc())
         .all()
     )
@@ -1593,6 +1606,155 @@ def get_campaign_detail(
         payment_ref=getattr(campaign, "payment_ref", None),
         payment_status=getattr(campaign, "payment_status", "unpaid")
     )
+
+
+@router.patch("/campaigns/{campaign_id}", response_model=HomeBannerItem, status_code=status.HTTP_200_OK)
+def update_campaign(
+    campaign_id: str,
+    payload: UpdateCampaignRequest,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mengubah judul atau foto flyer kampanye iklan milik user.
+    Hanya bisa dilakukan jika iklan belum kedaluwarsa.
+    """
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    if not campaign or campaign.status == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kampanye iklan tidak ditemukan."
+        )
+
+    if str(campaign.owner_user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Anda tidak memiliki izin untuk mengedit kampanye toko ini."
+        )
+
+    now = datetime.now(timezone.utc)
+    exp_utc = _ensure_utc(campaign.expires_at)
+    if campaign.status == "expired" or exp_utc <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Masa tayang iklan telah berakhir. Silakan perbarui langganan iklan terlebih dahulu untuk mengubah materi."
+        )
+
+    if payload.title is not None and payload.title.strip():
+        campaign.title = payload.title.strip()
+    if payload.banner_url is not None and payload.banner_url.strip():
+        campaign.banner_url = payload.banner_url.strip()
+
+    db.commit()
+    db.refresh(campaign)
+
+    store = db.query(Store).filter(Store.id == campaign.store_id).first()
+    delta = exp_utc - now
+    days_left = max(0, delta.days + (1 if delta.seconds > 0 else 0)) if exp_utc > now else 0
+
+    return HomeBannerItem(
+        id=str(campaign.id),
+        store_id=str(campaign.store_id),
+        store_nama=store.nama if store else "Toko",
+        store_alamat=store.alamat if store else None,
+        store_lat=store.lat if store else None,
+        store_lng=store.lng if store else None,
+        title=campaign.title,
+        banner_url=campaign.banner_url,
+        duration_days=campaign.duration_days,
+        price_paid=campaign.price_paid,
+        distance_km=0.0,
+        expires_at=campaign.expires_at.isoformat(),
+        days_left=days_left,
+        status=campaign.status,
+        payment_method=getattr(campaign, "payment_method", "QRIS"),
+        payment_ref=getattr(campaign, "payment_ref", None),
+        payment_status=getattr(campaign, "payment_status", "unpaid")
+    )
+
+
+@router.post("/campaigns/{campaign_id}/renew", response_model=InitiatePaymentResponse, status_code=status.HTTP_200_OK)
+def renew_campaign(
+    campaign_id: str,
+    payload: Optional[RenewCampaignRequest] = None,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Memperbarui masa tayang kampanye iklan kedaluwarsa dengan sistem pembayaran Xendit yang sudah ada.
+    """
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    if not campaign or campaign.status == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kampanye iklan tidak ditemukan."
+        )
+
+    if str(campaign.owner_user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Anda tidak memiliki izin untuk memperbarui kampanye toko ini."
+        )
+
+    owner = (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.user_id == user_id,
+            StoreOwner.store_id == campaign.store_id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+        )
+        .first()
+    )
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Hanya pemilik toko terverifikasi yang dapat memperbarui kampanye iklan."
+        )
+
+    if payload and payload.duration_days in (3, 7, 14):
+        campaign.duration_days = payload.duration_days
+        pricing_map = {3: 15000, 7: 30000, 14: 50000}
+        campaign.price_paid = pricing_map.get(payload.duration_days, campaign.price_paid)
+
+    campaign.status = "pending_payment"
+    campaign.payment_status = "unpaid"
+    db.commit()
+
+    return initiate_campaign_payment(campaign_id=campaign_id, user_id=user_id, db=db)
+
+
+@router.delete("/campaigns/{campaign_id}", status_code=status.HTTP_200_OK)
+def delete_campaign(
+    campaign_id: str,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Menghapus kampanye iklan milik toko mitra (soft-delete).
+    Penghapusan tidak mengembalikan uang jika masa berlaku masih ada (non-refundable).
+    """
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    if not campaign or campaign.status == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kampanye iklan tidak ditemukan."
+        )
+
+    if str(campaign.owner_user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Anda tidak memiliki izin untuk menghapus kampanye toko ini."
+        )
+
+    campaign.status = "deleted"
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": "Kampanye iklan berhasil dihapus.",
+        "campaign_id": campaign_id,
+    }
 
 
 # Sama dengan invoice_duration default di xendit_service.create_invoice (86400 dtk).
