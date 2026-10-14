@@ -669,7 +669,7 @@ def claim_store(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error in claim_store: {e}", exc_info=True)
+        logger.error(f"Error in claim_store: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Terjadi kesalahan pada server saat memproses klaim toko."
@@ -1011,7 +1011,7 @@ def submit_new_store(
         db.refresh(sub)
     except Exception as e:
         db.rollback()
-        logger.error(f"Error saving store submission: {e}", exc_info=True)
+        logger.error(f"Error saving store submission: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Gagal menyimpan pengajuan toko.")
 
     return UserSubmissionItem(
@@ -1204,7 +1204,7 @@ def verify_new_store_submission(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error in verify_new_store_submission: {e}", exc_info=True)
+        logger.error(f"Error in verify_new_store_submission: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Terjadi kesalahan pada server saat menyetujui toko baru.")
 
 
@@ -1244,7 +1244,7 @@ def reject_new_store_submission(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error in reject_new_store_submission: {e}", exc_info=True)
+        logger.error(f"Error in reject_new_store_submission: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Terjadi kesalahan pada server saat menolak pengajuan toko.")
 
 
