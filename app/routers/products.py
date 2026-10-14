@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, Query, HTTPException, status, UploadFile
 from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field
-from pathlib import Path
 import logging
 
 from app.database import get_db
@@ -200,50 +199,6 @@ def update_product_photo_url(
     db.commit()
     db.refresh(product)
     return product
-
-
-def detect_image_type(
-    filename: Optional[str],
-    declared_content_type: Optional[str],
-    contents: bytes
-) -> tuple[str, str]:
-    """
-    Mendeteksi tipe MIME dan ekstensi gambar berdasarkan signature bytes (magic numbers),
-    ekstensi berkas, atau declared content-type dari multipart request.
-    Mengembalikan (normalized_content_type, extension) seperti ("image/jpeg", ".jpg").
-    Melemparkan HTTPException(400) jika bukan gambar valid.
-    """
-    raw_ct = (declared_content_type or "").lower().split(";")[0].strip()
-    ext = Path(filename or "").suffix.lower()
-
-    # 1. Deteksi melalui magic bytes (signature file sebenarnya)
-    if contents.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg", ".jpg"
-    if contents.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png", ".png"
-    if contents.startswith(b"RIFF") and len(contents) >= 12 and contents[8:12] == b"WEBP":
-        return "image/webp", ".webp"
-
-    # 2. Deteksi melalui ekstensi file (misalnya .jpg, .jpeg, .png, .webp)
-    if ext in [".jpg", ".jpeg"]:
-        return "image/jpeg", ".jpg"
-    if ext == ".png":
-        return "image/png", ".png"
-    if ext == ".webp":
-        return "image/webp", ".webp"
-
-    # 3. Deteksi melalui declared content_type jika ekstensi / signature belum matched
-    if raw_ct in ["image/jpeg", "image/jpg", "image/pjpeg"]:
-        return "image/jpeg", ".jpg"
-    if raw_ct in ["image/png", "image/x-png"]:
-        return "image/png", ".png"
-    if raw_ct == "image/webp":
-        return "image/webp", ".webp"
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Format file tidak valid. Gunakan format JPEG, PNG, atau WebP."
-    )
 
 
 @router.post("/{product_id}/upload-photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
