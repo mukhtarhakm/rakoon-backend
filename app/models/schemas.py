@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, BeforeValidator
+from pydantic import BaseModel, Field, BeforeValidator, field_validator
 from datetime import datetime
 from typing import Optional, Union, List, Annotated, Any
 from uuid import UUID
@@ -72,17 +72,31 @@ class ScanResponse(BaseModel):
     model_used: Optional[str] = Field(None, description="Model AI yang digunakan untuk ekstraksi akhir")
     escalated_to_verification: Optional[bool] = Field(False, description="Status eskalasi verifikasi sekunder (legacy, default False)")
 
+# Batas wajar input konfirmasi scan (anti peracunan data, P5-02).
+MAX_PRICE_RUPIAH = 10_000_000
+MAX_CONFIRM_ITEMS = 100
+MAX_PRODUCT_NAME_LENGTH = 200
+
+
 class ConfirmItem(BaseModel):
-    nama_produk: str = Field(..., description="Nama produk yang dikonfirmasi")
-    harga: int = Field(..., description="Harga produk hasil konfirmasi/koreksi")
+    nama_produk: str = Field(..., max_length=MAX_PRODUCT_NAME_LENGTH, description="Nama produk yang dikonfirmasi")
+    harga: int = Field(..., gt=0, le=MAX_PRICE_RUPIAH, description="Harga produk hasil konfirmasi/koreksi (Rp, > 0)")
     ukuran: Optional[float] = Field(None, description="Ukuran produk (nullable)")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (nullable)")
     kategori: ProductCategoryType = Field(default=ProductCategory.LAINNYA, description="Kategori produk hasil konfirmasi/koreksi")
 
+    @field_validator("nama_produk")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Nama produk tidak boleh kosong")
+        return v
+
 class ConfirmRequest(BaseModel):
     store_id: Union[int, str, UUID] = Field(..., description="ID dari toko tempat scan dilakukan")
     user_id: Union[int, str, UUID] = Field(..., description="ID dari pengguna yang melakukan konfirmasi")
-    items: List[ConfirmItem] = Field(..., description="Daftar item hasil scan yang dikonfirmasi")
+    items: List[ConfirmItem] = Field(..., min_length=1, max_length=MAX_CONFIRM_ITEMS, description="Daftar item hasil scan yang dikonfirmasi (1-100)")
 
 class ConfirmResponse(BaseModel):
     items_saved: int = Field(..., description="Jumlah entri harga yang berhasil disimpan")

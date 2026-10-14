@@ -13,6 +13,7 @@ import httpx
 from fastapi import APIRouter, File, UploadFile, HTTPException, Query, status, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.models.schemas import (
     ScanResponse,
@@ -214,6 +215,80 @@ async def scan_shelf_photo(
     return await process_shelf_image(contents, content_type)
 
 
+def _find_product_by_name(db: Session, clean_name: str) -> Optional[Product]:
+    """Cocokkan nama produk persis tanpa beda huruf besar/kecil; % dan _ pada input bersifat literal."""
+    return db.query(Product).filter(func.lower(Product.nama) == clean_name.lower()).first()
+
+
+def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> ConfirmResponse:
+    items_saved = 0
+    products_created = 0
+
+    now_utc = datetime.now(timezone.utc)
+    # 1. Buat satu scan_session untuk batch konfirmasi ini
+    scan_session = ScanSession(
+        user_id=user_id,
+        store_id=store_id,
+        created_at=now_utc
+    )
+    db.add(scan_session)
+    db.flush() # Flush untuk mendapatkan generated ID scan_session
+
+    for item in items:
+        clean_name = item.nama_produk.strip()
+
+        # Cek di session's new objects terlebih dahulu untuk menghindari duplikasi dalam batch yang sama
+        product = None
+        for obj in db.new:
+            if isinstance(obj, Product) and obj.nama.lower() == clean_name.lower():
+                product = obj
+                break
+
+        if not product:
+            product = _find_product_by_name(db, clean_name)
+
+        if product:
+            # Produk sudah ada, ambil product_id-nya
+            product_id = product.id
+            # Update category only if the existing category is legacy "General"
+            if product.kategori.strip().lower() == "general":
+                product.kategori = item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
+        else:
+            # Produk belum ada, buat produk baru
+            new_product = Product(
+                nama=clean_name,
+                ukuran=item.ukuran,
+                satuan=item.satuan,
+                kategori=item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
+            )
+            db.add(new_product)
+            db.flush() # Flush untuk mendapatkan generated ID dari database
+            product_id = new_product.id
+            products_created += 1
+
+        # Insert ke tabel price_entries untuk tiap item dengan scan_session_id
+        db.add(PriceEntry(
+            product_id=product_id,
+            store_id=store_id,
+            harga=item.harga,
+            sumber_user_id=user_id,
+            status_verifikasi=VerificationStatus.VERIFIED,
+            scan_session_id=scan_session.id,
+            timestamp=now_utc
+        ))
+        items_saved += 1
+
+    # Commit seluruh perubahan sekaligus secara atomic
+    db.commit()
+
+    return ConfirmResponse(
+        items_saved=items_saved,
+        products_created=products_created,
+        message=f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru.",
+        scan_session_id=str(scan_session.id)
+    )
+
+
 @router.post("/confirm", response_model=ConfirmResponse, status_code=status.HTTP_201_CREATED)
 def confirm_scan_results(
     request_data: ConfirmRequest,
@@ -222,91 +297,51 @@ def confirm_scan_results(
 ):
     """
     Menyimpan hasil scan produk ke database setelah dikonfirmasi atau dikoreksi oleh user di frontend.
-    Jika produk belum terdaftar di tabel 'products' (berdasarkan nama case-insensitive), produk baru akan dibuat.
-    Setiap entri harga akan disimpan ke tabel 'price_entries' yang diasosiasikan dengan satu 'scan_sessions'.
+    Toko harus ada (404 bila tidak). Jika produk belum terdaftar di tabel 'products' (nama sama persis,
+    tanpa beda huruf besar/kecil), produk baru dibuat. Balapan nama produk (IntegrityError) diulang sekali
+    sehingga produk yang baru dibuat pihak lain dipakai, bukan 500.
+    Setiap entri harga disimpan ke tabel 'price_entries' yang diasosiasikan dengan satu 'scan_sessions'.
     """
-    items_saved = 0
-    products_created = 0
-    
     try:
-        now_utc = datetime.now(timezone.utc)
-        # 1. Buat satu scan_session untuk batch konfirmasi ini
-        scan_session = ScanSession(
-            user_id=user_id,
-            store_id=str(request_data.store_id),
-            created_at=now_utc
-        )
-        db.add(scan_session)
-        db.flush() # Flush untuk mendapatkan generated ID scan_session
-        
-        for item in request_data.items:
-            product_id = None
-            clean_name = item.nama_produk.strip()
-            
-            # Cek apakah produk dengan nama yang sama sudah ada di tabel products (case-insensitive match)
-            # Cek di session's new objects terlebih dahulu untuk menghindari duplikasi dalam batch yang sama
-            product = None
-            for obj in db.new:
-                if isinstance(obj, Product) and obj.nama.lower() == clean_name.lower():
-                    product = obj
-                    break
-            
-            if not product:
-                product = db.query(Product).filter(Product.nama.ilike(clean_name)).first()
-            
-            if product:
-                # Produk sudah ada, ambil product_id-nya
-                product_id = product.id
-                # Update category only if the existing category is legacy "General"
-                if product.kategori.strip().lower() == "general":
-                    product.kategori = item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
-            else:
-                # Produk belum ada, buat produk baru
-                new_product = Product(
-                    nama=clean_name,
-                    ukuran=item.ukuran,
-                    satuan=item.satuan,
-                    kategori=item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
-                )
-                db.add(new_product)
-                db.flush() # Flush untuk mendapatkan generated ID dari database
-                product_id = new_product.id
-                products_created += 1
-                
-            # Insert ke tabel price_entries untuk tiap item dengan scan_session_id
-            price_entry = PriceEntry(
-                product_id=product_id,
-                store_id=str(request_data.store_id),
-                harga=item.harga,
-                sumber_user_id=user_id,
-                status_verifikasi=VerificationStatus.VERIFIED,
-                scan_session_id=scan_session.id,
-                timestamp=now_utc
-            )
-            db.add(price_entry)
-            items_saved += 1
+        store_id = str(UUID(str(request_data.store_id)))
+    except ValueError:
+        store_id = None
 
-            
-        # Commit seluruh perubahan sekaligus secara atomic
-        db.commit()
-        
-        message = f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru."
-        return ConfirmResponse(
-            items_saved=items_saved,
-            products_created=products_created,
-            message=message,
-            scan_session_id=str(scan_session.id)
-        )
-        
+    try:
+        store_exists = store_id is not None and db.query(Store.id).filter(Store.id == store_id).first() is not None
     except Exception as e:
-        db.rollback()
         raise safe_error(
             logger,
             e,
             "Terjadi kesalahan saat menyimpan konfirmasi scan.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            log_prefix="Error during scan confirmation",
+            log_prefix="Error checking store for scan confirmation",
         )
+    if not store_exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toko tidak ditemukan.")
+
+    for attempt in (1, 2):
+        try:
+            return _save_confirmation(db, user_id, store_id, request_data.items)
+        except IntegrityError as e:
+            db.rollback()
+            if attempt == 2:
+                raise safe_error(
+                    logger,
+                    e,
+                    "Terjadi kesalahan saat menyimpan konfirmasi scan.",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    log_prefix="Integrity error during scan confirmation",
+                )
+        except Exception as e:
+            db.rollback()
+            raise safe_error(
+                logger,
+                e,
+                "Terjadi kesalahan saat menyimpan konfirmasi scan.",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                log_prefix="Error during scan confirmation",
+            )
 
 
 @router.get("/recent", response_model=List[RecentScanItem], status_code=status.HTTP_200_OK)
