@@ -99,6 +99,8 @@ class TestAuth(unittest.TestCase):
         db.close()
 
     def tearDown(self):
+        from app.dependencies import get_current_admin_user
+        app.dependency_overrides.pop(get_current_admin_user, None)
         # Restore original get_db override
         from app.database import get_db
         if self.original_get_db is not None:
@@ -144,7 +146,14 @@ class TestAuth(unittest.TestCase):
             
         return jwt.encode(payload, key, algorithm=alg, headers=headers)
 
+    def _admin_gate(self):
+        # POST /stores/ dan /price/ khusus admin. Test ini menguji identitas/validasi token, bukan gerbang admin
+        # (lihat tests/test_admin_only_writes.py), jadi gerbangnya dilewati; identitas tetap dari get_current_user asli.
+        from app.dependencies import get_current_admin_user
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
+
     def _make_auth_request(self, token=None, headers=None):
+        self._admin_gate()
         if headers is None:
             headers = {}
             if token is not None:
@@ -394,7 +403,8 @@ class TestAuth(unittest.TestCase):
     @patch("app.dependencies.httpx.get")
     def test_create_price_valid_jwt(self, mock_get):
         mock_get.return_value = MockResponse(self.jwks_data, 200)
-        
+        self._admin_gate()
+
         # Seed store and product first
         from app.models.db_models import Store, Product, PriceEntry
         db = self.TestingSessionLocal()
@@ -427,7 +437,8 @@ class TestAuth(unittest.TestCase):
     @patch("app.dependencies.httpx.get")
     def test_create_price_body_user_id_cannot_spoof_identity(self, mock_get):
         mock_get.return_value = MockResponse(self.jwks_data, 200)
-        
+        self._admin_gate()
+
         from app.models.db_models import Store, Product, PriceEntry
         db = self.TestingSessionLocal()
         store = Store(id="a5b07384-d113-4956-b51c-43f11075d654", nama="Toko Uji")
@@ -498,7 +509,8 @@ class TestAuth(unittest.TestCase):
     @patch("app.dependencies.httpx.get")
     def test_create_store_valid_jwt(self, mock_get):
         mock_get.return_value = MockResponse(self.jwks_data, 200)
-        
+        self._admin_gate()
+
         token = self._create_token(sub=self.test_uuid)
         payload = {
             "nama": "Toko Sejahtera",

@@ -8,7 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin_user
 from app.models.db_models import Store, PriceEntry
 from app.services.errors import safe_error
 from pydantic import BaseModel, Field
@@ -199,10 +199,11 @@ def get_store_products(store_id: str, db: Session = Depends(get_db)):
 def create_store(
     store_data: StoreCreate,
     db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user)
+    user_id: str = Depends(get_current_user),
+    admin_user: dict = Depends(get_current_admin_user)
 ):
     """
-    Menambahkan toko baru secara manual ke database.
+    Menambahkan toko baru secara manual ke database (khusus admin; pengguna mengajukan toko lewat /ads/submit-new-store).
     Validasi nama toko tidak boleh kosong, dan lat/lng harus dalam rentang koordinat bumi yang valid.
     """
     # Validasi nama tidak boleh kosong

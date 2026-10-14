@@ -25,8 +25,10 @@ class TestVerificationStatus(unittest.TestCase):
         self.db = TestingSessionLocal()
         self.original_get_db = app.dependency_overrides.get(get_db)
         app.dependency_overrides[get_db] = lambda: self.db
-        from app.dependencies import get_current_user
+        from app.dependencies import get_current_user, get_current_admin_user
         app.dependency_overrides[get_current_user] = lambda: self.user_id
+        # POST /price/ khusus admin; gerbang admin sendiri diuji di tests/test_admin_only_writes.py
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": self.user_id, "role": "admin"}
         self.client = TestClient(app)
 
         # Seed initial data
@@ -43,8 +45,9 @@ class TestVerificationStatus(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         Base.metadata.drop_all(bind=engine)
-        from app.dependencies import get_current_user
+        from app.dependencies import get_current_user, get_current_admin_user
         app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_current_admin_user, None)
         if self.original_get_db is not None:
             app.dependency_overrides[get_db] = self.original_get_db
         else:

@@ -8,7 +8,7 @@ from datetime import datetime
 from app.models.schemas import PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem, VerificationStatus
 from app.models.db_models import PriceEntry, Product
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin_user
 from app.services import price_history_service
 from app.services.price_history_service import DateRange
 from app.routers.stores import get_nearby_stores
@@ -42,10 +42,11 @@ def parse_product_id(product_id: str) -> Union[int, str]:
 def create_price_entry(
     price_data: PriceEntryCreate,
     db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user)
+    user_id: str = Depends(get_current_user),
+    admin_user: dict = Depends(get_current_admin_user)
 ):
     """
-    Simpan entri harga baru ke database.
+    Simpan entri harga baru ke database (khusus admin; pengguna biasa memakai POST /scan/confirm).
     Status verifikasi default diatur menjadi "verified".
     """
     try:
