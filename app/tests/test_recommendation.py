@@ -191,35 +191,125 @@ class TestRecommendationFeature(unittest.TestCase):
         self.assertTrue(dim_group["best_value"]["is_best_value"])
         self.assertEqual(dim_group["best_value"]["badge"], "BEST VALUE")
 
-    def test_get_recommended_products_endpoint(self):
-        # Test GET /recommendation/recommended-products
+
+class TestRecommendedProductsEndpoint(unittest.TestCase):
+    """GET /recommendation/recommended-products membaca DB; galat DB menjadi 503, bukan data contoh (P8-02)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from app.database import Base
+        cls.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        cls.Session = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+        Base.metadata.create_all(bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.engine.dispose()
+
+    def setUp(self):
+        from app.database import get_db
+        self.client = TestClient(app)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        self._get_db = get_db
+        self._previous_override = app.dependency_overrides.get(get_db)
+        app.dependency_overrides[get_db] = override_get_db
+        self._clear_tables()
+
+    def tearDown(self):
+        if self._previous_override is not None:
+            app.dependency_overrides[self._get_db] = self._previous_override
+        else:
+            app.dependency_overrides.pop(self._get_db, None)
+        self._clear_tables()
+
+    def _clear_tables(self):
+        from app.models.db_models import PriceEntry, Product, Store
+        db = self.Session()
+        for model in (PriceEntry, Product, Store):
+            db.query(model).delete()
+        db.commit()
+        db.close()
+
+    def _seed(self):
+        from app.models.db_models import PriceEntry, Product, Store
+        user = "11111111-1111-1111-1111-111111111111"
+        db = self.Session()
+        store = Store(nama="Toko Dekat", lat=-7.7793, lng=110.4168)
+        milk = Product(nama="Susu Uji 1L", kategori="Minuman", ukuran=1.0, satuan="l")
+        rice = Product(nama="Beras Uji 5kg", kategori="Makanan Pokok", ukuran=5.0, satuan="kg")
+        db.add_all([store, milk, rice])
+        db.commit()
+        db.add_all([
+            PriceEntry(product_id=milk.id, store_id=store.id, harga=18000, sumber_user_id=user, status_verifikasi="verified"),
+            PriceEntry(product_id=rice.id, store_id=store.id, harga=65000, sumber_user_id=user, status_verifikasi="verified"),
+            PriceEntry(product_id=rice.id, store_id=store.id, harga=1000, sumber_user_id=user, status_verifikasi="rejected"),
+        ])
+        db.commit()
+        db.close()
+
+    def test_empty_database_returns_empty_list_not_sample_data(self):
+        response = self.client.get("/recommendation/recommended-products")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_returns_real_products_cheapest_first_and_ignores_rejected_prices(self):
+        self._seed()
         response = self.client.get("/recommendation/recommended-products")
         self.assertEqual(response.status_code, 200)
         items = response.json()
-        self.assertIsInstance(items, list)
-        self.assertGreater(len(items), 0)
-        first_item = items[0]
-        self.assertIn("id", first_item)
-        self.assertIn("nama", first_item)
-        self.assertIn("harga", first_item)
-        self.assertIn("nama_toko", first_item)
-        self.assertIn("updated_at", first_item)
+        self.assertEqual([i["nama"] for i in items], ["Susu Uji 1L", "Beras Uji 5kg"])
+        self.assertEqual([i["harga"] for i in items], [18000.0, 65000.0])
+        self.assertEqual({i["nama_toko"] for i in items}, {"Toko Dekat"})
+        for item in items:
+            for key in ("id", "nama", "harga", "nama_toko", "updated_at"):
+                self.assertIn(key, item)
+        self.assertNotIn("BABARSARI", response.text.upper())
 
-    def test_get_recommended_products_with_location_params(self):
-        # Test GET /recommendation/recommended-products with lat, lng, radius_km
-        response = self.client.get("/recommendation/recommended-products?lat=-7.7793&lng=110.4168&radius_km=1.0&limit=5")
+    def test_location_params_add_distance_and_respect_limit(self):
+        self._seed()
+        response = self.client.get(
+            "/recommendation/recommended-products?lat=-7.7793&lng=110.4168&radius_km=1.0&limit=1"
+        )
         self.assertEqual(response.status_code, 200)
         items = response.json()
-        self.assertIsInstance(items, list)
-        self.assertGreater(len(items), 0)
-        self.assertLessEqual(len(items), 5)
-        for item in items:
-            self.assertIn("id", item)
-            self.assertIn("nama", item)
-            self.assertIn("harga", item)
-            self.assertIn("jarak_km", item)
-            if item["jarak_km"] is not None:
-                self.assertLessEqual(item["jarak_km"], 1.0)
+        self.assertEqual(len(items), 1)
+        self.assertIsNotNone(items[0]["jarak_km"])
+        self.assertLessEqual(items[0]["jarak_km"], 1.0)
+
+    def test_database_error_returns_503_without_sample_data(self):
+        from unittest.mock import MagicMock
+        from app.database import get_db
+        broken = MagicMock()
+        broken.query.side_effect = Exception("db down")
+        app.dependency_overrides[get_db] = lambda: broken
+        response = self.client.get("/recommendation/recommended-products")
+        self.assertEqual(response.status_code, 503)
+        body = response.text.upper()
+        self.assertNotIn("INDOMIE", body)
+        self.assertNotIn("BABARSARI", body)
+
+    def test_alias_route_also_returns_503_on_database_error(self):
+        from unittest.mock import MagicMock
+        from app.database import get_db
+        broken = MagicMock()
+        broken.query.side_effect = Exception("db down")
+        app.dependency_overrides[get_db] = lambda: broken
+        self.assertEqual(self.client.get("/recommendation/recommended").status_code, 503)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -427,38 +427,11 @@ def get_recommended_products(
         results = [c["item"] for c in candidates]
 
     except Exception as e:
-        logger.warning(f"Failed to query DB for recommended products: {e}")
-
-    # Fallback only if database has zero products (e.g. initial unseeded DB)
-    if not results:
-        max_dist = max(0.1, radius_km)
-        default_items = [
-            RecommendedProductItem(
-                id="rec-1",
-                nama="INDOMIE GORENG 85G",
-                kategori="Makanan Instan",
-                harga=3100.0,
-                ukuran=85.0,
-                satuan="g",
-                nama_toko="MANNA KAMPUS BABARSARI",
-                jarak_km=min(0.5, max_dist),
-                updated_at="2026-08-11T18:33:00+00:00",
-                foto_url=None,
-            ),
-            RecommendedProductItem(
-                id="rec-2",
-                nama="BIMOLI MINYAK GORENG 2L",
-                kategori="Makanan Pokok",
-                harga=34500.0,
-                ukuran=2.0,
-                satuan="l",
-                nama_toko="INDOMARET BABARSARI",
-                jarak_km=min(0.3, max_dist),
-                updated_at="2026-08-11T17:00:00+00:00",
-                foto_url=None,
-            ),
-        ]
-        return default_items[:limit]
+        logger.error(f"Failed to query DB for recommended products: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gagal memuat rekomendasi produk. Coba lagi nanti."
+        )
 
     return results[:limit]
 
