@@ -291,6 +291,31 @@ def _has_verified_provider_proof(campaign: AdCampaign, db: Optional[Session] = N
     return False
 
 
+def _parse_amount(value) -> Optional[float]:
+    """Angka terbatas (finite); None bila kosong, bool, non-numerik, NaN, atau infinity."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    return amount if math.isfinite(amount) else None
+
+
+def _owner_is_verified(db: Session, campaign: AdCampaign) -> bool:
+    return (
+        db.query(StoreOwner)
+        .filter(
+            StoreOwner.user_id == campaign.owner_user_id,
+            StoreOwner.store_id == campaign.store_id,
+            StoreOwner.status == "verified",
+            StoreOwner.verified_at.isnot(None),
+        )
+        .first()
+        is not None
+    )
+
+
 def _reconcile_transaction_with_xendit(
     tx: PaymentTransaction,
     campaign: AdCampaign,
@@ -318,6 +343,19 @@ def _reconcile_transaction_with_xendit(
         now = datetime.now(timezone.utc)
 
         if x_status in ("PAID", "SETTLED"):
+            raw_amount = x_inv.get("paid_amount") if x_inv.get("paid_amount") is not None else x_inv.get("amount")
+            paid_amount = _parse_amount(raw_amount)
+            x_currency = x_inv.get("currency")
+            if (
+                paid_amount is None
+                or abs(paid_amount - float(tx.amount)) > 0.01
+                or (x_currency and str(x_currency).upper() != tx.currency.upper())
+            ):
+                logger.warning(f"Reconcile PAID ignored for {tx.external_id}: amount/currency missing or mismatched")
+                return False
+            if not _owner_is_verified(db, campaign):
+                logger.warning(f"Reconcile PAID ignored for {tx.external_id}: store owner not verified")
+                return False
             if tx.status != "PAID":
                 tx.status = "PAID"
                 tx.paid_at = _parse_iso(x_inv.get("paid_at")) or now
@@ -325,11 +363,12 @@ def _reconcile_transaction_with_xendit(
                 if x_inv.get("id"):
                     tx.xendit_invoice_id = x_inv["id"]
 
-                campaign.payment_status = "paid"
-                campaign.status = "active"
-                campaign.payment_ref = x_inv.get("id") or tx.external_id
-                campaign.start_at = now
-                campaign.expires_at = now + timedelta(days=campaign.duration_days)
+                if campaign.payment_status != "paid":
+                    campaign.payment_status = "paid"
+                    campaign.status = "active"
+                    campaign.payment_ref = x_inv.get("id") or tx.external_id
+                    campaign.start_at = now
+                    campaign.expires_at = now + timedelta(days=campaign.duration_days)
 
                 db.commit()
                 logger.info(f"Transaction {tx.external_id} for campaign {campaign.id} reconciled as PAID via Xendit API")
@@ -1710,11 +1749,17 @@ async def xendit_webhook(
             detail="Invalid JSON payload"
         )
 
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload"
+        )
+
     xendit_id = payload.get("id")
     external_id = payload.get("external_id")
-    event_status = (payload.get("status") or "").upper()
-    paid_amount = payload.get("paid_amount") if payload.get("paid_amount") is not None else payload.get("amount")
-    currency = payload.get("currency", "IDR")
+    event_status = str(payload.get("status") or "").upper()
+    currency = payload.get("currency")
+    raw_amount = payload.get("paid_amount") if payload.get("paid_amount") is not None else payload.get("amount")
 
     if not external_id:
         raise HTTPException(
@@ -1735,23 +1780,41 @@ async def xendit_webhook(
             detail="Transaction not found"
         )
 
-    if currency and currency != tx.currency:
+    is_paid_event = event_status in ("PAID", "SETTLED")
+    if currency and str(currency).upper() != tx.currency.upper():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Currency mismatch"
         )
-
-    if paid_amount is not None and abs(float(paid_amount) - float(tx.amount)) > 0.01:
+    if is_paid_event and not currency:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Amount mismatch"
+            detail="Missing currency in webhook payload"
         )
+
+    if is_paid_event or raw_amount is not None:
+        amount = _parse_amount(raw_amount)
+        if amount is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing or invalid amount in webhook payload"
+            )
+        if abs(amount - float(tx.amount)) > 0.01:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Amount mismatch"
+            )
 
     now = datetime.now(timezone.utc)
     if event_status in ("PAID", "SETTLED"):
         # Idempotensi: jika sudah PAID, kembalikan 200 tanpa mengulang aktivasi
         if tx.status == "PAID":
             return {"status": "already_processed", "message": "Transaction already verified and paid"}
+
+        # Invoice EXPIRED/FAILED tidak boleh dihidupkan lagi oleh PAID terlambat (perlu penanganan manual/refund).
+        if tx.status in ("EXPIRED", "FAILED"):
+            logger.warning(f"Webhook PAID rejected for {tx.status} transaction {tx.external_id}; needs manual review")
+            return {"status": "rejected", "message": f"Transaction is {tx.status}; payment not applied"}
 
         campaign = db.query(AdCampaign).filter(AdCampaign.id == tx.campaign_id).with_for_update().first()
         if not campaign:
@@ -1760,17 +1823,24 @@ async def xendit_webhook(
                 detail="Associated campaign not found"
             )
 
+        if not _owner_is_verified(db, campaign):
+            logger.warning(f"Webhook PAID rejected for {tx.external_id}: store owner is not verified")
+            return {"status": "rejected", "message": "Store owner is not verified; payment not applied"}
+
         tx.status = "PAID"
         tx.paid_at = _parse_iso(payload.get("paid_at")) or now
         tx.updated_at = now
         if xendit_id:
             tx.xendit_invoice_id = xendit_id
 
-        campaign.payment_status = "paid"
-        campaign.status = "active"
-        campaign.payment_ref = xendit_id or tx.external_id
-        campaign.start_at = now
-        campaign.expires_at = now + timedelta(days=campaign.duration_days)
+        if campaign.payment_status != "paid":
+            campaign.payment_status = "paid"
+            campaign.status = "active"
+            campaign.payment_ref = xendit_id or tx.external_id
+            campaign.start_at = now
+            campaign.expires_at = now + timedelta(days=campaign.duration_days)
+        else:
+            logger.warning(f"Campaign {campaign.id} already paid; extra payment {tx.external_id} recorded without changing schedule")
 
         try:
             db.commit()

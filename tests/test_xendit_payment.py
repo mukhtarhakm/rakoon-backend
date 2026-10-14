@@ -993,6 +993,185 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
         self.assertEqual((campaign.status, campaign.payment_status), ("active", "paid"))
 
+    # ---- P4-02/03: webhook PAID dan rekonsiliasi ----
+
+    def _pay_campaign(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        cid = self._create_pending_campaign()["id"]
+        res = self.client.post(f"/ads/campaigns/{cid}/pay").json()
+        return cid, res["external_id"], res["xendit_invoice_id"]
+
+    def _webhook(self, payload):
+        return self.client.post(
+            "/ads/webhook/xendit", json=payload, headers={"x-callback-token": CALLBACK_TOKEN}
+        )
+
+    def _paid_payload(self, ext_id, inv_id, **overrides):
+        payload = {"id": inv_id, "external_id": ext_id, "status": "PAID", "paid_amount": 15000, "currency": "IDR"}
+        payload.update(overrides)
+        return {k: v for k, v in payload.items() if v is not ...}
+
+    def _assert_campaign_untouched(self, cid):
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.assertEqual((campaign.status, campaign.payment_status), ("pending_payment", "unpaid"))
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_34_webhook_paid_on_expired_or_failed_transaction_is_rejected(self, mock_create_inv):
+        for tx_status in ("EXPIRED", "FAILED"):
+            with self.subTest(tx_status=tx_status):
+                cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+                self._set_first_tx(cid, status=tx_status)
+
+                res = self._webhook(self._paid_payload(ext_id, inv_id))
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(res.json()["status"], "rejected")
+                self._assert_campaign_untouched(cid)
+                self.assertEqual(self._txs(cid)[0].status, tx_status)
+
+                self.db.query(PaymentTransaction).delete()
+                self.db.query(AdCampaign).delete()
+                self.db.commit()
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_35_webhook_paid_for_unverified_owner_is_rejected(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        self.db.query(StoreOwner).filter(StoreOwner.user_id == TEST_USER_ID).update({"status": "rejected"})
+        self.db.commit()
+
+        res = self._webhook(self._paid_payload(ext_id, inv_id))
+        self.assertEqual(res.json()["status"], "rejected")
+        self._assert_campaign_untouched(cid)
+        self.assertEqual(self._txs(cid)[0].status, "PENDING")
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_36_webhook_paid_without_amount_is_rejected_not_skipped(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        res = self._webhook(self._paid_payload(ext_id, inv_id, paid_amount=...))
+        self.assertEqual(res.status_code, 400)
+        self._assert_campaign_untouched(cid)
+        self.assertEqual(self._txs(cid)[0].status, "PENDING")
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_37_webhook_paid_without_or_with_blank_currency_is_rejected(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        for currency in (..., None, ""):
+            with self.subTest(currency=currency):
+                res = self._webhook(self._paid_payload(ext_id, inv_id, currency=currency))
+                self.assertEqual(res.status_code, 400)
+                self._assert_campaign_untouched(cid)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_38_webhook_paid_amount_must_match_exactly(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        for amount in (14999, 20000, "abc", "NaN", "inf", True, [15000]):
+            with self.subTest(amount=amount):
+                res = self._webhook(self._paid_payload(ext_id, inv_id, paid_amount=amount))
+                self.assertEqual(res.status_code, 400)
+                self._assert_campaign_untouched(cid)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_39_webhook_paid_accepts_amount_field_and_settled_status(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        res = self._webhook(self._paid_payload(ext_id, inv_id, paid_amount=..., amount=15000, status="SETTLED"))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "success")
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.assertEqual((campaign.status, campaign.payment_status), ("active", "paid"))
+
+    def test_40_webhook_non_dict_payload_returns_400(self):
+        for body in ([{"status": "PAID"}], "PAID", 123, None):
+            with self.subTest(body=body):
+                res = self.client.post(
+                    "/ads/webhook/xendit", json=body, headers={"x-callback-token": CALLBACK_TOKEN}
+                )
+                self.assertEqual(res.status_code, 400)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_41_webhook_non_string_status_does_not_crash(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        res = self._webhook(self._paid_payload(ext_id, inv_id, status=123))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "ignored")
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_42_duplicate_paid_webhook_is_idempotent_and_keeps_schedule(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        first = self._webhook(self._paid_payload(ext_id, inv_id))
+        self.assertEqual(first.json()["status"], "success")
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        start_first, expires_first = campaign.start_at, campaign.expires_at
+
+        for status in ("PAID", "SETTLED"):
+            again = self._webhook(self._paid_payload(ext_id, inv_id, status=status))
+            self.assertEqual(again.status_code, 200)
+            self.assertEqual(again.json()["status"], "already_processed")
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.assertEqual((campaign.start_at, campaign.expires_at), (start_first, expires_first))
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_43_second_paid_invoice_for_same_campaign_does_not_reset_schedule(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        cid = self._create_pending_campaign()["id"]
+        first = self.client.post(f"/ads/campaigns/{cid}/pay").json()
+        self._set_first_tx(cid, created_at=datetime.now(timezone.utc) - timedelta(hours=25))
+        second = self.client.post(f"/ads/campaigns/{cid}/pay").json()
+        self.assertNotEqual(first["external_id"], second["external_id"])
+
+        self.assertEqual(
+            self._webhook(self._paid_payload(second["external_id"], second["xendit_invoice_id"])).json()["status"],
+            "success",
+        )
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        start_a, expires_a, ref_a = campaign.start_at, campaign.expires_at, campaign.payment_ref
+
+        late = self._webhook(self._paid_payload(first["external_id"], first["xendit_invoice_id"]))
+        self.assertEqual(late.status_code, 200)
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.assertEqual((campaign.start_at, campaign.expires_at, campaign.payment_ref), (start_a, expires_a, ref_a))
+        self.assertEqual(sorted(t.status for t in self._txs(cid)), ["PAID", "PAID"])
+
+    def _reconcile(self, cid, x_invoice):
+        from app.routers.ads import _reconcile_transaction_with_xendit
+        self.db.expire_all()
+        tx = self._txs(cid)[0]
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        with patch("app.services.xendit_service.get_invoice_by_id", return_value=x_invoice):
+            return _reconcile_transaction_with_xendit(tx, campaign, self.db)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_44_reconcile_paid_requires_matching_amount_and_currency(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        base = {"id": inv_id, "external_id": ext_id, "status": "PAID"}
+        bad_invoices = [
+            {**base},                                      # tanpa nominal
+            {**base, "paid_amount": 5000},                 # kurang
+            {**base, "paid_amount": 99999},                # lebih
+            {**base, "paid_amount": "abc"},                # bukan angka
+            {**base, "paid_amount": 15000, "currency": "USD"},
+        ]
+        for inv in bad_invoices:
+            with self.subTest(invoice=inv):
+                self.assertFalse(self._reconcile(cid, inv))
+                self._assert_campaign_untouched(cid)
+                self.assertEqual(self._txs(cid)[0].status, "PENDING")
+
+        self.assertTrue(self._reconcile(cid, {**base, "paid_amount": 15000, "currency": "IDR"}))
+        self.assertEqual(self._txs(cid)[0].status, "PAID")
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_45_reconcile_paid_for_unverified_owner_does_not_activate(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        self.db.query(StoreOwner).filter(StoreOwner.user_id == TEST_USER_ID).update({"status": "rejected"})
+        self.db.commit()
+        self.assertFalse(self._reconcile(cid, {"id": inv_id, "external_id": ext_id, "status": "PAID", "paid_amount": 15000}))
+        self._assert_campaign_untouched(cid)
+
 
 if __name__ == "__main__":
     unittest.main()
