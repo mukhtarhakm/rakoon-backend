@@ -24,6 +24,8 @@ class ProductOut(BaseModel):
     ukuran: Optional[float] = Field(None, description="Ukuran/volume/berat produk")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (gr, ml, dll)")
     foto_url: Optional[str] = Field(None, description="URL foto produk")
+    harga_terendah: Optional[float] = Field(None, description="Harga terendah produk terverifikasi")
+    nama_toko_terendah: Optional[str] = Field(None, description="Nama toko yang menjual harga terendah")
 
     model_config = {"from_attributes": True}
 
@@ -49,9 +51,12 @@ def get_products(
     db: Session = Depends(get_db)
 ):
     """
-    Mengambil daftar produk dari database lokal.
+    Mengambil daftar produk dari database lokal beserta harga terendah terverifikasi.
     Dapat difilter berdasarkan nama produk ('search') dan/atau kategori ('category').
     """
+    from app.models.db_models import PriceEntry, Store
+    from sqlalchemy import func
+
     query = db.query(Product)
     
     if search and search.strip():
@@ -61,7 +66,54 @@ def get_products(
         query = query.filter(Product.kategori.ilike(f"%{category.strip()}%"))
         
     products = query.order_by(Product.nama.asc()).limit(limit).all()
-    return products
+    if not products:
+        return []
+
+    # Batch query harga terendah terverifikasi per produk
+    product_ids = [prod.id for prod in products]
+    price_entries = (
+        db.query(PriceEntry)
+        .filter(
+            PriceEntry.product_id.in_(product_ids),
+            func.lower(PriceEntry.status_verifikasi) == "verified"
+        )
+        .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
+        .all()
+    )
+
+    pes_by_product = {}
+    needed_store_ids = set()
+    for pe in price_entries:
+        pid_str = str(pe.product_id)
+        if pid_str not in pes_by_product:
+            pes_by_product[pid_str] = pe
+            needed_store_ids.add(pe.store_id)
+
+    store_names = {}
+    if needed_store_ids:
+        stores = db.query(Store).filter(Store.id.in_(needed_store_ids)).all()
+        for s in stores:
+            store_names[str(s.id)] = s.nama
+
+    output = []
+    for prod in products:
+        pe = pes_by_product.get(str(prod.id))
+        harga_min = float(pe.harga) if pe else None
+        toko_min = store_names.get(str(pe.store_id)) if pe else None
+
+        output.append(
+            ProductOut(
+                id=prod.id,
+                nama=prod.nama,
+                kategori=prod.kategori,
+                ukuran=prod.ukuran,
+                satuan=prod.satuan,
+                foto_url=getattr(prod, "foto_url", None),
+                harga_terendah=harga_min,
+                nama_toko_terendah=toko_min,
+            )
+        )
+    return output
 
 
 @router.get("/catalog", response_model=List[ProductCatalogItem], status_code=status.HTTP_200_OK)
@@ -170,7 +222,35 @@ def get_product_by_id(product_id: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Produk dengan ID '{product_id}' tidak ditemukan."
         )
-    return product
+
+    from app.models.db_models import PriceEntry, Store
+    from sqlalchemy import func
+
+    pe = (
+        db.query(PriceEntry)
+        .filter(
+            PriceEntry.product_id == product.id,
+            func.lower(PriceEntry.status_verifikasi) == "verified"
+        )
+        .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
+        .first()
+    )
+
+    toko_min = None
+    if pe:
+        st = db.query(Store).filter(Store.id == pe.store_id).first()
+        toko_min = st.nama if st else None
+
+    return ProductOut(
+        id=product.id,
+        nama=product.nama,
+        kategori=product.kategori,
+        ukuran=product.ukuran,
+        satuan=product.satuan,
+        foto_url=getattr(product, "foto_url", None),
+        harga_terendah=float(pe.harga) if pe else None,
+        nama_toko_terendah=toko_min,
+    )
 
 
 @router.put("/{product_id}/photo", response_model=ProductOut, status_code=status.HTTP_200_OK)

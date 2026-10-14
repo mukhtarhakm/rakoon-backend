@@ -325,5 +325,39 @@ class TestBudgetShoppingAssistant(unittest.TestCase):
         self.assertEqual(data["recommended_store"]["nama"], "Alfamart Sudirman")
         self.assertEqual(data["store_alternatives"][0]["store_info"]["nama"], "Indomaret Gatsu")
 
+    def test_equal_cost_distance_tie_breaker(self):
+        # Store 1 is close to user, Store 2 is far away
+        # User at (-7.79, 110.37)
+        # Store 1 at (-7.79, 110.38) ~ 1.1 km
+        # Store 2 at (-6.20, 106.80) ~ 400 km
+        s1 = self.db.query(Store).filter(Store.id == self.store1_id).first()
+        s1.lat = -7.79
+        s1.lng = 110.38
+
+        s2 = self.db.query(Store).filter(Store.id == self.store2_id).first()
+        s2.lat = -6.20
+        s2.lng = 106.80
+        self.db.commit()
+
+        p1_s1 = PriceEntry(product_id=self.prod1_id, store_id=self.store1_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        p1_s2 = PriceEntry(product_id=self.prod1_id, store_id=self.store2_id, harga=10000, sumber_user_id=self.user_id, status_verifikasi=VerificationStatus.VERIFIED.value)
+        self.db.add_all([p1_s1, p1_s2])
+        self.db.commit()
+
+        payload = {
+            "budget": 50000,
+            "items": [{"product_id": self.prod1_id, "qty": 1}],
+            "lat": -7.79,
+            "lng": 110.37
+        }
+        response = self.client.post("/budget-shopping/recommend", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        # Indomaret Gatsu should win despite Alfamart coming first alphabetically, because Indomaret is much closer!
+        self.assertEqual(data["recommended_store"]["store_id"], self.store1_id)
+        self.assertIsNotNone(data["recommended_store"]["distance_km"])
+        self.assertLess(data["recommended_store"]["distance_km"], 5.0)
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,17 @@ def is_valid_uuid(val: str) -> bool:
     except (ValueError, TypeError, AttributeError):
         return False
 
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    import math
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return round(R * c, 2)
+
 @router.post("/recommend", response_model=BudgetRecommendResponse, status_code=status.HTTP_200_OK)
 def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Depends(get_db)):
     """
@@ -119,6 +130,9 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
             pid = str(row.product_id)
 
             if sid not in stores_data:
+                dist_km = None
+                if payload.lat is not None and payload.lng is not None and row.lat_toko is not None and row.lng_toko is not None:
+                    dist_km = haversine_distance(payload.lat, payload.lng, float(row.lat_toko), float(row.lng_toko))
                 stores_data[sid] = {
                     "store_info": StoreInfoOutput(
                         store_id=sid,
@@ -126,6 +140,7 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
                         alamat=row.alamat_toko,
                         lat=float(row.lat_toko) if row.lat_toko is not None else None,
                         lng=float(row.lng_toko) if row.lng_toko is not None else None,
+                        distance_km=dist_km,
                     ),
                     "items_map": {}
                 }
@@ -173,10 +188,14 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
         # Skenario A: Ada toko Full Match yang valid <= budget
         within_budget_stores = [s for s in all_full_match_stores if s["total_cost"] <= user_budget]
         if within_budget_stores:
-            # Algoritma Pemilihan: Pilih total_cost TERKECIL, break ties dengan store name secara alfabetis
+            # Algoritma Pemilihan: Pilih total_cost TERKECIL, break ties dengan jarak (distance_km) lalu nama toko
             within_budget_sorted = sorted(
                 within_budget_stores,
-                key=lambda x: (x["total_cost"], x["store_info"].nama)
+                key=lambda x: (
+                    x["total_cost"],
+                    x["store_info"].distance_km if x["store_info"].distance_km is not None else 999999.0,
+                    x["store_info"].nama
+                )
             )
             best_store_candidate = within_budget_sorted[0]
             
@@ -184,9 +203,10 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
             cost_str = format_rupiah(best_store_candidate["total_cost"])
             rem_str = format_rupiah(best_store_candidate["remaining_budget"])
             budget_str = format_rupiah(user_budget)
+            dist_text = f" (Jarak ~{best_store_candidate['store_info'].distance_km} km)" if best_store_candidate["store_info"].distance_km is not None else ""
 
             explanation = (
-                f"Rekomendasi Utama: {store_name} dapat memenuhi seluruh {total_requested_count} daftar barang "
+                f"Rekomendasi Utama: {store_name}{dist_text} dapat memenuhi seluruh {total_requested_count} daftar barang "
                 f"kebutuhan Anda (100% Full Match) dengan total belanja termurah {cost_str}. "
                 f"Sisa budget Anda adalah {rem_str}."
             )
@@ -218,17 +238,22 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
         if all_full_match_stores:
             over_budget_sorted = sorted(
                 all_full_match_stores,
-                key=lambda x: (x["total_cost"], x["store_info"].nama)
+                key=lambda x: (
+                    x["total_cost"],
+                    x["store_info"].distance_km if x["store_info"].distance_km is not None else 999999.0,
+                    x["store_info"].nama
+                )
             )
             cheapest_overbudget_store = over_budget_sorted[0]
             store_name = cheapest_overbudget_store["store_info"].nama
             cheapest_cost = cheapest_overbudget_store["total_cost"]
             shortage = cheapest_cost - user_budget
+            dist_text = f" (Jarak ~{cheapest_overbudget_store['store_info'].distance_km} km)" if cheapest_overbudget_store["store_info"].distance_km is not None else ""
             
             explanation = (
                 f"Budget {format_rupiah(user_budget)} tidak mencukupi untuk membeli seluruh barang kebutuhan di toko mana pun. "
                 f"Estimasi total belanja termurah yang memiliki 100% barang Anda adalah {format_rupiah(cheapest_cost)} "
-                f"di {store_name} (Kurang {format_rupiah(shortage)}). Kurangi kuantitas barang atau naikkan budget."
+                f"di {store_name}{dist_text} (Kurang {format_rupiah(shortage)}). Kurangi kuantitas barang atau naikkan budget."
             )
 
             # Alternatives for over-budget stores

@@ -269,6 +269,8 @@ class BudgetItemInput(BaseModel):
 class BudgetRecommendRequest(BaseModel):
     budget: float = Field(..., gt=0, description="Total budget yang dialokasikan pengguna dalam Rupiah")
     items: List[BudgetItemInput] = Field(..., min_length=1, description="Daftar barang dan kuantitas yang dibutuhkan")
+    lat: Optional[float] = Field(None, description="Latitude lokasi pengguna (opsional)")
+    lng: Optional[float] = Field(None, description="Longitude lokasi pengguna (opsional)")
 
 class BudgetItemResult(BaseModel):
     product_id: str = Field(..., description="ID produk")
@@ -283,6 +285,7 @@ class StoreInfoOutput(BaseModel):
     alamat: Optional[str] = Field(None, description="Alamat toko (bisa null)")
     lat: Optional[float] = Field(None, description="Latitude lokasi toko")
     lng: Optional[float] = Field(None, description="Longitude lokasi toko")
+    distance_km: Optional[float] = Field(None, description="Jarak toko dari pengguna dalam km")
 
 class ProductAvailability(BaseModel):
     product_id: str = Field(..., description="ID produk")
