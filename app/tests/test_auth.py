@@ -264,6 +264,7 @@ class TestAuth(unittest.TestCase):
         from app.dependencies import jwks_cache
         jwks_cache.keys = {}
         jwks_cache.last_fetched = 0.0
+        jwks_cache.last_failure = 0.0
         token = self._create_token(sub=self.test_uuid)
         response = self._make_auth_request(token)
         self.assertEqual(response.status_code, 201)
@@ -544,16 +545,25 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
     # ------------------------------------------------------------------
-    # Karakterisasi perilaku auth SAAT INI (P1-18).
-    # Test bernama test_current_behavior_* mengunci perilaku yang diketahui
-    # bermasalah. JANGAN diperbaiki di sini; selisihnya harus terlihat saat
-    # opsi B dikerjakan (PERBAIKAN.md 2b, audit/P1_fix.md).
+    # Perilaku target opsi B (audit/P1_fix.md): admin HANYA bila email ada di ADMIN_EMAILS
+    # dan email_confirmed_at terisi lewat Supabase Admin API (di-mock, fail-closed).
+    # users.role, app_metadata.role, dan klaim role tidak lagi memberi admin.
+    # JWKS: gagal saat cache kosong -> 503, kunci lama dibatasi umurnya, refetch dibatasi.
     # ------------------------------------------------------------------
+
+    ADMIN_EMAIL = "boss@example.com"
+    CONFIRMED = {"email": "boss@example.com", "email_confirmed_at": "2026-01-01T00:00:00Z"}
+    SERVICE_KEY = "test-service-key-not-real"
 
     def _reset_jwks_cache(self):
         from app.dependencies import jwks_cache
         jwks_cache.keys = {}
         jwks_cache.last_fetched = 0.0
+        jwks_cache.last_failure = 0.0
+
+    def _clear_admin_cache(self):
+        import app.dependencies as deps
+        getattr(deps, "_admin_confirm_cache", {}).clear()
 
     def _clear_users(self):
         from app.models.db_models import User
@@ -571,27 +581,59 @@ class TestAuth(unittest.TestCase):
         db.close()
         self.addCleanup(self._clear_users)
 
-    def _prepare_valid_jwks(self, mock_get):
-        mock_get.return_value = MockResponse(self.jwks_data, 200)
+    def _prepare_http(self, mock_get, admin=None, admin_exc=None, admin_status=200, jwks_exc=None, jwks_status=200):
+        """Router HTTP palsu: JWKS dan Supabase Admin API. Tidak ada jaringan sungguhan."""
+        import app.dependencies as deps
         self._reset_jwks_cache()
+        self._clear_admin_cache()
         self.addCleanup(self._reset_jwks_cache)
+        self.addCleanup(self._clear_admin_cache)
+        self.admin_calls = []
+        self.jwks_calls = []
 
-    def _me(self, token, admin_emails="", client=None):
-        # ADMIN_EMAILS selalu di-patch agar hasil tidak bergantung pada .env lokal.
-        with patch.dict(os.environ, {"ADMIN_EMAILS": admin_emails}):
-            return (client or self.client).get(
-                "/auth/me", headers={"Authorization": f"Bearer {token}"}
-            )
+        def router(url, *args, **kwargs):
+            if url == deps.JWKS_URL:
+                self.jwks_calls.append(url)
+                if jwks_exc:
+                    raise jwks_exc
+                return MockResponse(self.jwks_data if jwks_status == 200 else {}, jwks_status)
+            if "/auth/v1/admin/users/" in url:
+                self.admin_calls.append({"url": url, "headers": kwargs.get("headers") or {}, "timeout": kwargs.get("timeout")})
+                if admin_exc:
+                    raise admin_exc
+                return MockResponse(admin if admin is not None else {}, admin_status)
+            raise AssertionError(f"panggilan HTTP tak terduga: {url}")
 
-    def _put_photo(self, token, admin_emails=""):
-        with patch.dict(os.environ, {"ADMIN_EMAILS": admin_emails}):
+        mock_get.side_effect = router
+
+    def _env(self, admin_emails="", service_key=None):
+        # ADMIN_EMAILS dan kunci service selalu di-patch agar hasil tidak bergantung pada .env lokal.
+        return patch.dict(os.environ, {
+            "ADMIN_EMAILS": admin_emails,
+            "SUPABASE_SERVICE_KEY": self.SERVICE_KEY if service_key is None else service_key,
+        })
+
+    def _me(self, token, admin_emails="", client=None, service_key=None):
+        with self._env(admin_emails, service_key):
+            return (client or self.client).get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    def _put_photo(self, token, admin_emails="", service_key=None):
+        with self._env(admin_emails, service_key):
             return self.client.put(
                 f"/products/{uuid.uuid4()}/photo",
                 json={"foto_url": "https://example.com/a.png"},
                 headers={"Authorization": f"Bearer {token}"},
             )
 
-    # 1. Token valid tanpa klaim email
+    def _get_protected(self, token):
+        return self.client.get("/auth/test-protected", headers={"Authorization": f"Bearer {token}"})
+
+    def _boss_token(self, **extra):
+        claims = {"email": self.ADMIN_EMAIL}
+        claims.update(extra)
+        return self._create_token(extra=claims)
+
+    # --- 1. Token valid tanpa klaim email -------------------------------------------------
 
     @patch("app.dependencies.httpx.get")
     def test_auth_me_and_test_protected_require_token(self, mock_get):
@@ -599,223 +641,178 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(self.client.get("/auth/test-protected").status_code, 401)
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_valid_token_without_email_claim(self, mock_get):
-        self._prepare_valid_jwks(mock_get)
-        response = self._me(self._create_token(), admin_emails="admin@example.com")
+    def test_valid_token_without_email_claim_is_plain_user_and_never_calls_admin_api(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        response = self._me(self._create_token(), admin_emails=self.ADMIN_EMAIL)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
             {"user_id": self.test_uuid, "email": None, "nama": None, "role": "user"},
         )
+        self.assertEqual(self.admin_calls, [])
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_token_without_email_uses_users_table_email_for_admin_emails(self, mock_get):
-        # Email dari tabel users dipakai bila token tidak membawa email, lalu
-        # dicocokkan dengan ADMIN_EMAILS. Diubah di gelombang b, P1-01/P1-02.
-        self._prepare_valid_jwks(mock_get)
-        self._seed_user(role="user", email="db-admin@example.com", nama="Admin DB")
-        response = self._me(self._create_token(), admin_emails="db-admin@example.com")
+    def test_users_table_email_is_never_used_to_decide_admin(self, mock_get):
+        # Dulu: token tanpa email memakai email tabel users untuk mencocokkan ADMIN_EMAILS (P1-01/P1-02).
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        self._seed_user(role="user", email=self.ADMIN_EMAIL, nama="Admin DB")
+        response = self._me(self._create_token(), admin_emails=self.ADMIN_EMAIL)
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["role"], "admin")
-        self.assertEqual(data["email"], "db-admin@example.com")
-        self.assertEqual(data["nama"], "Admin DB")
+        self.assertEqual(response.json()["role"], "user")
+        self.assertEqual(self.admin_calls, [])
 
-    # 2. Klaim role: app_metadata, user_metadata, role tingkat atas
+    # --- 2. Klaim role tidak lagi memberi admin ---------------------------------------------
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_app_metadata_role_admin_grants_admin(self, mock_get):
-        # Klaim token cukup untuk jadi admin. Diubah di gelombang b, P1-01.
-        self._prepare_valid_jwks(mock_get)
-        token = self._create_token(extra={"app_metadata": {"role": "admin"}})
-        response = self._me(token)
+    def test_app_metadata_role_admin_no_longer_grants_admin(self, mock_get):
+        self._prepare_http(mock_get)
+        response = self._me(self._create_token(extra={"app_metadata": {"role": "admin"}}))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["role"], "admin")
+        self.assertEqual(response.json()["role"], "user")
 
     @patch("app.dependencies.httpx.get")
     def test_user_metadata_role_admin_is_not_honored_but_name_is_used(self, mock_get):
-        self._prepare_valid_jwks(mock_get)
-        token = self._create_token(
-            extra={"user_metadata": {"role": "admin", "full_name": "Budi"}}
-        )
+        self._prepare_http(mock_get)
+        token = self._create_token(extra={"user_metadata": {"role": "admin", "full_name": "Budi"}})
         response = self._me(token)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["role"], "user")
         self.assertEqual(response.json()["nama"], "Budi")
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_top_level_role_admin_grants_admin(self, mock_get):
-        # Klaim `role` tingkat atas ikut menentukan admin. Diubah di gelombang b, P1-06.
-        self._prepare_valid_jwks(mock_get)
-        response = self._me(self._create_token(extra={"role": "admin"}))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["role"], "admin")
+    def test_top_level_role_claim_no_longer_grants_admin(self, mock_get):
+        self._prepare_http(mock_get)
+        for role in ("admin", "authenticated", "service_role"):
+            with self.subTest(role=role):
+                response = self._me(self._create_token(extra={"role": role}))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["role"], "user")
 
     @patch("app.dependencies.httpx.get")
-    def test_top_level_role_authenticated_is_plain_user(self, mock_get):
-        self._prepare_valid_jwks(mock_get)
-        response = self._me(self._create_token(extra={"role": "authenticated"}))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["role"], "user")
-
-    @patch("app.dependencies.httpx.get")
-    def test_current_behavior_null_user_metadata_returns_500(self, mock_get):
-        # user_metadata bernilai null jatuh ke AttributeError -> 500, bukan 401/200.
-        # Diubah di gelombang b, P1-07.
-        self._prepare_valid_jwks(mock_get)
+    def test_null_user_metadata_and_app_metadata_do_not_crash(self, mock_get):
+        # P1-07: dulu AttributeError -> 500. Sekarang token sah dengan klaim null tetap dilayani sebagai user.
+        self._prepare_http(mock_get)
         client = TestClient(app, raise_server_exceptions=False)
-        token = self._create_token(extra={"user_metadata": None})
-        self.assertEqual(self._me(token, client=client).status_code, 500)
+        for extra in ({"user_metadata": None}, {"app_metadata": None}, {"user_metadata": None, "app_metadata": None}):
+            with self.subTest(extra=extra):
+                response = self._me(self._create_token(extra=extra), client=client)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["role"], "user")
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_null_app_metadata_returns_500(self, mock_get):
-        # app_metadata null (bukan admin lewat jalur lain) -> AttributeError -> 500.
-        # Diubah di gelombang b, P1-07.
-        self._prepare_valid_jwks(mock_get)
-        client = TestClient(app, raise_server_exceptions=False)
-        token = self._create_token(extra={"app_metadata": None})
-        self.assertEqual(self._me(token, client=client).status_code, 500)
-
-    @patch("app.dependencies.httpx.get")
-    def test_current_behavior_admin_endpoint_passes_with_app_metadata_claim(self, mock_get):
-        # Gerbang admin lolos hanya dari klaim token (produk tidak ada -> 404, bukan 403).
-        # Diubah di gelombang b, P1-01.
-        self._prepare_valid_jwks(mock_get)
+    def test_admin_endpoint_rejects_app_metadata_admin_claim_with_403(self, mock_get):
+        self._prepare_http(mock_get)
         token = self._create_token(extra={"app_metadata": {"role": "admin"}})
-        self.assertEqual(self._put_photo(token).status_code, 404)
+        self.assertEqual(self._put_photo(token).status_code, 403)
+
+    # --- 3. Prioritas: hanya ADMIN_EMAILS + email_confirmed_at ------------------------------------
 
     @patch("app.dependencies.httpx.get")
-    def test_admin_endpoint_rejects_plain_user_with_403(self, mock_get):
-        self._prepare_valid_jwks(mock_get)
-        self.assertEqual(self._put_photo(self._create_token()).status_code, 403)
-
-    # 3. JWKS gagal diambil
-
-    @patch("app.dependencies.httpx.get")
-    def test_current_behavior_jwks_fetch_error_with_empty_cache_returns_401(self, mock_get):
-        # Fail-closed, tetapi 401 (bukan 503): pengguna sah melihat "tidak terautentikasi"
-        # saat Supabase gangguan. Diubah di gelombang b, P1-08.
-        self._reset_jwks_cache()
-        self.addCleanup(self._reset_jwks_cache)
-        mock_get.side_effect = Exception("jwks down")
-        response = self.client.get(
-            "/auth/test-protected", headers={"Authorization": f"Bearer {self._create_token()}"}
-        )
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["detail"], "Not authenticated")
-        self.assertEqual(mock_get.call_count, 1)
-
-    @patch("app.dependencies.httpx.get")
-    def test_current_behavior_jwks_http_error_with_empty_cache_returns_401(self, mock_get):
-        self._reset_jwks_cache()
-        self.addCleanup(self._reset_jwks_cache)
-        mock_get.return_value = MockResponse({}, 503)
-        response = self.client.get(
-            "/auth/test-protected", headers={"Authorization": f"Bearer {self._create_token()}"}
-        )
-        self.assertEqual(response.status_code, 401)
-
-    @patch("app.dependencies.httpx.get")
-    def test_current_behavior_stale_jwks_keys_stay_valid_when_refresh_fails(self, mock_get):
-        # Cache lewat TTL + fetch gagal: kunci lama tetap diterima tanpa batas umur.
-        # Diubah di gelombang b, P1-08.
-        from app.dependencies import jwks_cache
-        self.addCleanup(self._reset_jwks_cache)
-        jwks_cache.keys = {self.test_kid: self.jwks_data["keys"][0]}
-        jwks_cache.last_fetched = time.time() - 3600
-        mock_get.side_effect = Exception("jwks down")
-        response = self.client.get(
-            "/auth/test-protected", headers={"Authorization": f"Bearer {self._create_token()}"}
-        )
+    def test_admin_when_email_in_admin_emails_and_confirmed(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        response = self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"user_id": self.test_uuid})
-        self.assertEqual(mock_get.call_count, 1)
-
-    # 4. kid tidak dikenal
+        self.assertEqual(response.json()["role"], "admin")
+        self.assertEqual(response.json()["email"], self.ADMIN_EMAIL)
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_unknown_kid_refetches_jwks_on_every_request(self, mock_get):
-        # Tanpa cache negatif: tiap request dengan kid acak memaksa satu fetch sinkron.
-        # Diubah di gelombang b, P1-08.
-        self._prepare_valid_jwks(mock_get)
-        ok = self.client.get(
-            "/auth/test-protected", headers={"Authorization": f"Bearer {self._create_token()}"}
-        )
-        self.assertEqual(ok.status_code, 200)
-        self.assertEqual(mock_get.call_count, 1)
-        for i in range(3):
-            token = self._create_token(kid=f"random-kid-{i}")
-            response = self.client.get(
-                "/auth/test-protected", headers={"Authorization": f"Bearer {token}"}
-            )
-            self.assertEqual(response.status_code, 401)
-        self.assertEqual(mock_get.call_count, 4)
-
-    # 5. Token kedaluwarsa dan alg selain ES256
+    def test_admin_api_called_with_service_key_short_timeout_and_key_not_leaked(self, mock_get):
+        import app.dependencies as deps
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        response = self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL)
+        self.assertEqual(len(self.admin_calls), 1)
+        call = self.admin_calls[0]
+        self.assertEqual(call["url"], f"{deps.base_url}/auth/v1/admin/users/{self.test_uuid}")
+        self.assertEqual(call["headers"].get("apikey"), self.SERVICE_KEY)
+        self.assertEqual(call["headers"].get("Authorization"), f"Bearer {self.SERVICE_KEY}")
+        self.assertLessEqual(call["timeout"], 5.0)
+        self.assertNotIn(self.SERVICE_KEY, response.text)
 
     @patch("app.dependencies.httpx.get")
-    def test_expired_token_within_leeway_is_accepted(self, mock_get):
-        # exp 30 dtk lalu masih diterima (leeway 60 dtk); 90 dtk lalu ditolak
-        # (test_expired_jwt).
-        self._prepare_valid_jwks(mock_get)
-        token = self._create_token(exp=int(time.time()) - 30)
-        response = self.client.get(
-            "/auth/test-protected", headers={"Authorization": f"Bearer {token}"}
-        )
-        self.assertEqual(response.status_code, 200)
+    def test_non_admin_email_is_user_and_admin_api_is_not_called(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        token = self._create_token(extra={"email": "someone@example.com"})
+        response = self._me(token, admin_emails=self.ADMIN_EMAIL)
+        self.assertEqual(response.json()["role"], "user")
+        self.assertEqual(self.admin_calls, [])
 
     @patch("app.dependencies.httpx.get")
-    def test_alg_es384_rejected_before_jwks_fetch(self, mock_get):
-        self._reset_jwks_cache()
-        self.addCleanup(self._reset_jwks_cache)
-        token = self._create_token(alg="ES384", key=ec.generate_private_key(ec.SECP384R1()))
-        response = self.client.get(
-            "/auth/test-protected", headers={"Authorization": f"Bearer {token}"}
-        )
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(mock_get.call_count, 0)
-
-    @patch("app.dependencies.httpx.get")
-    def test_alg_none_rejected_before_jwks_fetch(self, mock_get):
-        self._reset_jwks_cache()
-        self.addCleanup(self._reset_jwks_cache)
-        payload = {
-            "sub": self.test_uuid,
-            "aud": "authenticated",
-            "iss": self.expected_issuer,
-            "exp": int(time.time()) + 3600,
-        }
-        token = jwt.encode(payload, None, algorithm="none", headers={"kid": self.test_kid})
-        response = self.client.get(
-            "/auth/test-protected", headers={"Authorization": f"Bearer {token}"}
-        )
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(mock_get.call_count, 0)
-
-    # 6. Prioritas ADMIN_EMAILS vs users.role vs klaim JWT
-
-    @patch("app.dependencies.httpx.get")
-    def test_current_behavior_users_role_admin_grants_admin_without_env(self, mock_get):
-        # users.role='admin' cukup, walau email token tidak ada di ADMIN_EMAILS.
-        # Diubah di gelombang b, P1-01/P1-05.
-        self._prepare_valid_jwks(mock_get)
+    def test_old_sources_users_role_app_metadata_and_role_claim_do_not_grant_admin(self, mock_get):
+        # Regresi penghapusan sumber lama (P1-01/P1-05/P1-06): email tidak ada di ADMIN_EMAILS.
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
         self._seed_user(role="admin")
-        token = self._create_token(extra={"email": "other@example.com"})
-        response = self._me(token, admin_emails="")
+        token = self._create_token(
+            extra={"email": "other@example.com", "app_metadata": {"role": "admin"}, "role": "admin"}
+        )
+        response = self._me(token, admin_emails=self.ADMIN_EMAIL)
+        self.assertEqual(response.json()["role"], "user")
+        self.assertEqual(self._put_photo(token, admin_emails=self.ADMIN_EMAIL).status_code, 403)
+
+    @patch("app.dependencies.httpx.get")
+    def test_empty_admin_emails_means_no_admin(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        for value in ("", " ", ",,"):
+            with self.subTest(admin_emails=value):
+                self.assertEqual(self._me(self._boss_token(), admin_emails=value).json()["role"], "user")
+        self.assertEqual(self.admin_calls, [])
+
+    @patch("app.dependencies.httpx.get")
+    def test_admin_emails_matching_is_case_and_space_insensitive(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        token = self._create_token(extra={"email": " Boss@Example.COM "})
+        response = self._me(token, admin_emails=" other@example.com , BOSS@example.com ")
         self.assertEqual(response.json()["role"], "admin")
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_admin_emails_overrides_users_role_user(self, mock_get):
-        # ADMIN_EMAILS mengalahkan users.role='user'. Diubah di gelombang b, P1-01.
-        self._prepare_valid_jwks(mock_get)
-        self._seed_user(role="user", email="db-user@example.com")
-        token = self._create_token(extra={"email": "boss@example.com"})
-        response = self._me(token, admin_emails="boss@example.com")
-        self.assertEqual(response.json()["role"], "admin")
+    def test_unconfirmed_email_is_not_admin(self, mock_get):
+        for confirmed_at in (None, ""):
+            with self.subTest(email_confirmed_at=confirmed_at):
+                self._prepare_http(mock_get, admin={"email": self.ADMIN_EMAIL, "email_confirmed_at": confirmed_at})
+                response = self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["role"], "user")
 
     @patch("app.dependencies.httpx.get")
-    def test_admin_emails_matches_token_email_not_users_table_email(self, mock_get):
-        self._prepare_valid_jwks(mock_get)
+    def test_admin_api_failure_is_fail_closed_not_500(self, mock_get):
+        client = TestClient(app, raise_server_exceptions=False)
+        failures = [
+            {"admin_exc": Exception("boom")},
+            {"admin_exc": TimeoutError("timeout")},
+            {"admin": {}, "admin_status": 500},
+            {"admin": {}, "admin_status": 404},
+            {"admin": ["not", "a", "dict"]},
+            {"admin": {"email": "other@example.com", "email_confirmed_at": "2026-01-01T00:00:00Z"}},
+        ]
+        for kwargs in failures:
+            with self.subTest(kwargs=str(kwargs)):
+                self._prepare_http(mock_get, **kwargs)
+                response = self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL, client=client)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["role"], "user")
+
+    @patch("app.dependencies.httpx.get")
+    def test_missing_service_key_is_fail_closed(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        # "" lewat patch.dict menimpa nilai .env; tanpa kunci tidak ada panggilan Admin API.
+        response = self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL, service_key=" ")
+        self.assertEqual(response.json()["role"], "user")
+        self.assertEqual(self.admin_calls, [])
+
+    @patch("app.dependencies.httpx.get")
+    def test_positive_admin_result_is_cached_briefly_and_negative_is_not(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        for _ in range(3):
+            self.assertEqual(self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL).json()["role"], "admin")
+        self.assertEqual(len(self.admin_calls), 1)
+
+        self._prepare_http(mock_get, admin={"email": self.ADMIN_EMAIL, "email_confirmed_at": None})
+        for _ in range(2):
+            self.assertEqual(self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL).json()["role"], "user")
+        self.assertEqual(len(self.admin_calls), 2)
+
+    @patch("app.dependencies.httpx.get")
+    def test_role_follows_token_email_not_users_table_email(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
         self._seed_user(role="user", email="db-only@example.com")
         token = self._create_token(extra={"email": "token@example.com"})
         response = self._me(token, admin_emails="db-only@example.com")
@@ -823,30 +820,135 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(response.json()["email"], "token@example.com")
 
     @patch("app.dependencies.httpx.get")
-    def test_admin_emails_matching_is_case_and_space_insensitive(self, mock_get):
-        self._prepare_valid_jwks(mock_get)
-        token = self._create_token(extra={"email": " Boss@Example.COM "})
-        response = self._me(token, admin_emails=" other@example.com , BOSS@example.com ")
-        self.assertEqual(response.json()["role"], "admin")
+    def test_users_table_role_never_changes_the_returned_role(self, mock_get):
+        self._prepare_http(mock_get)
+        for role in ("admin", "merchant", "user"):
+            with self.subTest(users_role=role):
+                self._seed_user(role=role)
+                self.assertEqual(self._me(self._create_token()).json()["role"], "user")
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_no_source_can_demote_an_admin(self, mock_get):
-        # Satu sumber admin sudah cukup; klaim 'user' di JWT tidak mencabutnya.
-        # Diubah di gelombang b, P1-01.
-        self._prepare_valid_jwks(mock_get)
-        self._seed_user(role="admin")
-        token = self._create_token(
-            extra={"app_metadata": {"role": "user"}, "role": "authenticated"}
-        )
-        response = self._me(token, admin_emails="")
-        self.assertEqual(response.json()["role"], "admin")
+    def test_admin_dependency_end_to_end_admin_passes_and_user_gets_403(self, mock_get):
+        self._prepare_http(mock_get, admin=self.CONFIRMED)
+        # Admin lolos gerbang (produk acak -> 404, bukan 403).
+        self.assertEqual(self._put_photo(self._boss_token(), admin_emails=self.ADMIN_EMAIL).status_code, 404)
+        # Pengguna biasa -> 403.
+        self.assertEqual(self._put_photo(self._create_token(), admin_emails=self.ADMIN_EMAIL).status_code, 403)
+
+    # --- 4. JWKS (P1-07/P1-08) -----------------------------------------------------------------------
 
     @patch("app.dependencies.httpx.get")
-    def test_current_behavior_nonstandard_users_role_is_returned_as_is(self, mock_get):
-        # users.role selain 'admin'/'user' diteruskan apa adanya ke respons /auth/me.
-        # Diubah di gelombang b, P1-05.
-        self._prepare_valid_jwks(mock_get)
-        self._seed_user(role="merchant")
-        response = self._me(self._create_token())
-        self.assertEqual(response.json()["role"], "merchant")
-        self.assertEqual(self._put_photo(self._create_token()).status_code, 403)
+    def test_jwks_fetch_error_with_empty_cache_returns_503(self, mock_get):
+        self._prepare_http(mock_get, jwks_exc=Exception("jwks down"))
+        response = self._get_protected(self._create_token())
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("jwks", response.text.lower())
+
+    @patch("app.dependencies.httpx.get")
+    def test_jwks_http_error_with_empty_cache_returns_503(self, mock_get):
+        self._prepare_http(mock_get, jwks_status=503)
+        self.assertEqual(self._get_protected(self._create_token()).status_code, 503)
+
+    @patch("app.dependencies.httpx.get")
+    def test_jwks_outage_does_not_refetch_on_every_request(self, mock_get):
+        self._prepare_http(mock_get, jwks_exc=Exception("jwks down"))
+        for _ in range(3):
+            self.assertEqual(self._get_protected(self._create_token()).status_code, 503)
+        self.assertEqual(len(self.jwks_calls), 1)
+
+    @patch("app.dependencies.httpx.get")
+    def test_stale_jwks_keys_valid_within_limit_rejected_beyond_it_when_refresh_fails(self, mock_get):
+        from app.dependencies import jwks_cache
+        self._prepare_http(mock_get, jwks_exc=Exception("jwks down"))
+        jwks_cache.keys = {self.test_kid: self.jwks_data["keys"][0]}
+
+        jwks_cache.last_fetched = time.time() - 1000  # lewat TTL (300 dtk), masih dalam batas umur
+        ok = self._get_protected(self._create_token())
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json(), {"user_id": self.test_uuid})
+
+        self._reset_jwks_cache()
+        jwks_cache.keys = {self.test_kid: self.jwks_data["keys"][0]}
+        jwks_cache.last_fetched = time.time() - 24 * 3600  # jauh melewati batas umur kunci lama
+        self.assertEqual(self._get_protected(self._create_token()).status_code, 503)
+
+    @patch("app.dependencies.httpx.get")
+    def test_unknown_kid_does_not_trigger_unbounded_jwks_fetches(self, mock_get):
+        self._prepare_http(mock_get)
+        self.assertEqual(self._get_protected(self._create_token()).status_code, 200)
+        self.assertEqual(len(self.jwks_calls), 1)
+        for i in range(5):
+            response = self._get_protected(self._create_token(kid=f"random-kid-{i}"))
+            self.assertEqual(response.status_code, 401)
+        self.assertEqual(len(self.jwks_calls), 1)
+
+    @patch("app.dependencies.httpx.get")
+    def test_unknown_kid_after_cache_age_triggers_a_single_refresh(self, mock_get):
+        from app.dependencies import jwks_cache
+        self._prepare_http(mock_get)
+        self.assertEqual(self._get_protected(self._create_token()).status_code, 200)
+        jwks_cache.last_fetched = time.time() - 120  # lewat jeda minimum refetch
+        self.assertEqual(self._get_protected(self._create_token(kid="rotated-key")).status_code, 401)
+        self.assertEqual(len(self.jwks_calls), 2)
+        self.assertEqual(self._get_protected(self._create_token(kid="another-key")).status_code, 401)
+        self.assertEqual(len(self.jwks_calls), 2)
+
+    @patch("app.dependencies.httpx.get")
+    def test_invalid_key_and_pyjwk_errors_return_401_not_500(self, mock_get):
+        self._prepare_http(mock_get)
+        client = TestClient(app, raise_server_exceptions=False)
+        token = self._create_token()
+        for exc in (jwt.InvalidKeyError("bad key"), jwt.PyJWKError("bad jwk")):
+            with self.subTest(exc=type(exc).__name__):
+                with patch("app.dependencies.jwt.decode", side_effect=exc):
+                    response = client.get("/auth/test-protected", headers={"Authorization": f"Bearer {token}"})
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.json()["detail"], "Not authenticated")
+
+    @patch("app.dependencies.httpx.get")
+    def test_null_iat_claim_returns_401_not_500(self, mock_get):
+        self._prepare_http(mock_get)
+        client = TestClient(app, raise_server_exceptions=False)
+        token = self._create_token(extra={"iat": None})
+        response = client.get("/auth/test-protected", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(response.status_code, 401)
+
+    @patch("app.dependencies.httpx.get")
+    def test_malformed_jwk_in_jwks_returns_401_not_500(self, mock_get):
+        from app.dependencies import jwks_cache
+        self._prepare_http(mock_get)
+        client = TestClient(app, raise_server_exceptions=False)
+        broken = dict(self.jwks_data["keys"][0])
+        broken["x"] = "!!not-base64!!"
+        jwks_cache.keys = {self.test_kid: broken}
+        jwks_cache.last_fetched = time.time()
+        response = client.get("/auth/test-protected", headers={"Authorization": f"Bearer {self._create_token()}"})
+        self.assertEqual(response.status_code, 401)
+
+    # --- 5. Token kedaluwarsa dan alg selain ES256 (perilaku tetap) ---------------------------------
+
+    @patch("app.dependencies.httpx.get")
+    def test_expired_token_within_leeway_is_accepted(self, mock_get):
+        self._prepare_http(mock_get)
+        token = self._create_token(exp=int(time.time()) - 30)
+        self.assertEqual(self._get_protected(token).status_code, 200)
+
+    @patch("app.dependencies.httpx.get")
+    def test_alg_es384_rejected_before_jwks_fetch(self, mock_get):
+        self._prepare_http(mock_get)
+        token = self._create_token(alg="ES384", key=ec.generate_private_key(ec.SECP384R1()))
+        self.assertEqual(self._get_protected(token).status_code, 401)
+        self.assertEqual(self.jwks_calls, [])
+
+    @patch("app.dependencies.httpx.get")
+    def test_alg_none_rejected_before_jwks_fetch(self, mock_get):
+        self._prepare_http(mock_get)
+        payload = {
+            "sub": self.test_uuid,
+            "aud": "authenticated",
+            "iss": self.expected_issuer,
+            "exp": int(time.time()) + 3600,
+        }
+        token = jwt.encode(payload, None, algorithm="none", headers={"kid": self.test_kid})
+        self.assertEqual(self._get_protected(token).status_code, 401)
+        self.assertEqual(self.jwks_calls, [])

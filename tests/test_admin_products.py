@@ -94,42 +94,69 @@ class TestAdminProducts(unittest.TestCase):
         self.db.close()
         Base.metadata.drop_all(bind=engine)
 
+    def _get_profile(self, user_id, claims, admin_emails="", admin_api=None, admin_api_status=200):
+        """GET /auth/me dengan klaim token terverifikasi di-mock dan Supabase Admin API di-mock."""
+        app.dependency_overrides[get_current_user] = lambda: user_id
+        api_response = MagicMock()
+        api_response.status_code = admin_api_status
+        api_response.json.return_value = admin_api if admin_api is not None else {}
+        if admin_api_status != 200:
+            api_response.raise_for_status.side_effect = Exception("HTTP Error")
+        with patch("app.dependencies.verify_access_token", return_value={"sub": user_id, **claims}), \
+                patch("app.dependencies.httpx.get", return_value=api_response) as mock_get, \
+                patch.dict(os.environ, {"ADMIN_EMAILS": admin_emails, "SUPABASE_SERVICE_KEY": "test-service-key-not-real"}):
+            import app.dependencies as deps
+            getattr(deps, "_admin_confirm_cache", {}).clear()
+            res = self.client.get("/auth/me", headers={"Authorization": "Bearer test-token"})
+        return res, mock_get
+
     def test_get_my_profile_regular_user(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        res = self.client.get("/auth/me")
+        res, mock_get = self._get_profile(TEST_USER_ID, {"email": "budi@example.com"})
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["user_id"], TEST_USER_ID)
         self.assertEqual(data["role"], "user")
+        mock_get.assert_not_called()
 
-    def test_get_my_profile_admin_user(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
-        res = self.client.get("/auth/me")
+    def test_users_table_admin_role_no_longer_grants_admin(self):
+        # Opsi B: kolom users.role='admin' tidak lagi menjadi sumber admin.
+        res, mock_get = self._get_profile(TEST_ADMIN_ID, {"email": "admin@example.com"})
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["user_id"], TEST_ADMIN_ID)
-        self.assertEqual(data["role"], "admin")
+        self.assertEqual(data["role"], "user")
+        mock_get.assert_not_called()
 
-    def test_get_my_profile_admin_via_env(self):
-        env_user_id = "33333333-3333-3333-3333-333333333333"
-        user_with_env_email = User(
-            id=env_user_id,
-            nama="Super Admin",
-            email="superadmin@rakoon.com",
-            role="user"
+    def test_get_my_profile_admin_via_env_with_confirmed_email(self):
+        res, mock_get = self._get_profile(
+            TEST_USER_ID,
+            {"email": "superadmin@example.com"},
+            admin_emails="superadmin@example.com,boss@example.com",
+            admin_api={"email": "superadmin@example.com", "email_confirmed_at": "2026-01-01T00:00:00Z"},
         )
-        self.db.add(user_with_env_email)
-        self.db.commit()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["role"], "admin")
+        mock_get.assert_called_once()
 
-        os.environ["ADMIN_EMAILS"] = "superadmin@rakoon.com,boss@rakoon.com"
-        try:
-            app.dependency_overrides[get_current_user] = lambda: env_user_id
-            res = self.client.get("/auth/me")
-            self.assertEqual(res.status_code, 200)
-            data = res.json()
-            self.assertEqual(data["role"], "admin")
-        finally:
-            os.environ.pop("ADMIN_EMAILS", None)
+    def test_get_my_profile_env_admin_with_unconfirmed_email_is_user(self):
+        res, _ = self._get_profile(
+            TEST_USER_ID,
+            {"email": "superadmin@example.com"},
+            admin_emails="superadmin@example.com",
+            admin_api={"email": "superadmin@example.com", "email_confirmed_at": None},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["role"], "user")
+
+    def test_get_my_profile_env_admin_is_user_when_admin_api_fails(self):
+        res, _ = self._get_profile(
+            TEST_USER_ID,
+            {"email": "superadmin@example.com"},
+            admin_emails="superadmin@example.com",
+            admin_api_status=500,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["role"], "user")
 
     def test_update_photo_url_forbidden_for_regular_user(self):
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
