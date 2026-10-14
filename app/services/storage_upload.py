@@ -1,0 +1,82 @@
+import logging
+import uuid
+from typing import Tuple
+
+from fastapi import HTTPException, UploadFile, status
+
+from app.database import supabase
+
+logger = logging.getLogger("rakoon_backend.storage_upload")
+
+SUPABASE_BUCKET = "product-photos"
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+READ_CHUNK_BYTES = 64 * 1024
+
+_IMAGE_SIGNATURES = (
+    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
+)
+
+
+async def read_upload(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> bytes:
+    """Baca berkas bertahap; berhenti dan 413 begitu melewati batas, 400 bila kosong."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Ukuran file terlalu besar. Maksimum {max_bytes // (1024 * 1024)}MB.",
+            )
+        chunks.append(chunk)
+    if total == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Berkas yang diunggah kosong.")
+    return b"".join(chunks)
+
+
+def detect_content_type(contents: bytes, allow_pdf: bool = False) -> Tuple[str, str]:
+    """Tipe ditentukan hanya dari magic bytes; nama berkas dan Content-Type klien diabaikan."""
+    for signature, content_type, ext in _IMAGE_SIGNATURES:
+        if contents.startswith(signature):
+            return content_type, ext
+    if contents.startswith(b"RIFF") and contents[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    if allow_pdf and contents.startswith(b"%PDF"):
+        return "application/pdf", ".pdf"
+    kinds = "PDF, JPEG, PNG, atau WebP" if allow_pdf else "JPEG, PNG, atau WebP"
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Format file tidak valid. Gunakan {kinds}.",
+    )
+
+
+def store_public(contents: bytes, content_type: str, ext: str, prefix: str = "") -> str:
+    """Unggah ke Supabase Storage dengan nama acak dan kembalikan URL publik. Tanpa fallback."""
+    filename = f"{prefix}{uuid.uuid4().hex}{ext}"
+    try:
+        bucket = supabase.storage.from_(SUPABASE_BUCKET)
+        bucket.upload(filename, contents, {"content-type": content_type, "upsert": "true"})
+        public_url = bucket.get_public_url(filename)
+    except Exception as exc:
+        logger.error(f"Gagal mengunggah ke Supabase Storage: {type(exc).__name__}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Penyimpanan berkas sedang tidak tersedia. Coba lagi nanti.",
+        )
+    if not public_url:
+        logger.error("Supabase Storage tidak mengembalikan URL publik.")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Penyimpanan berkas tidak mengembalikan URL.",
+        )
+    return public_url.rstrip("?")
+
+
+async def upload_image(file: UploadFile, prefix: str = "") -> str:
+    contents = await read_upload(file)
+    content_type, ext = detect_content_type(contents)
+    return store_public(contents, content_type, ext, prefix)
