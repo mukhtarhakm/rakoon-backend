@@ -94,6 +94,12 @@ class TestAdminProducts(unittest.TestCase):
         self.db.close()
         Base.metadata.drop_all(bind=engine)
 
+    def _as_admin(self):
+        # Opsi B: admin ditentukan email ADMIN_EMAILS + Supabase Admin API (diuji di app/tests/test_auth.py),
+        # jadi test endpoint admin cukup melewati gerbangnya.
+        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": TEST_ADMIN_ID, "role": "admin"}
+
     def _get_profile(self, user_id, claims, admin_emails="", admin_api=None, admin_api_status=200):
         """GET /auth/me dengan klaim token terverifikasi di-mock dan Supabase Admin API di-mock."""
         app.dependency_overrides[get_current_user] = lambda: user_id
@@ -168,7 +174,7 @@ class TestAdminProducts(unittest.TestCase):
         self.assertIn("Hanya admin", res.json()["detail"])
 
     def test_update_photo_url_success_for_admin(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         test_url = "https://images.example.com/susu-cokelat.png"
         res = self.client.put(
             f"/products/{self.prod_id}/photo",
@@ -184,7 +190,7 @@ class TestAdminProducts(unittest.TestCase):
         self.assertEqual(prod.foto_url, test_url)
 
     def test_update_photo_url_not_found(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         res = self.client.put(
             "/products/nonexistent-id/photo",
             json={"foto_url": "https://example.com/image.png"}
@@ -201,7 +207,7 @@ class TestAdminProducts(unittest.TestCase):
         self.assertEqual(res.status_code, 403)
 
     def test_upload_photo_success_for_admin(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         fake_file = io.BytesIO(b"\x89PNG\r\n\x1a\nFake PNG file binary content")
         res = self.client.post(
             f"/products/{self.prod_id}/upload-photo",
@@ -215,7 +221,7 @@ class TestAdminProducts(unittest.TestCase):
 
     def test_upload_photo_jpg_with_octet_stream_success(self):
         """Admin can upload .jpg file even when client sends application/octet-stream or generic content-type"""
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         fake_jpg = io.BytesIO(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01Fake JPEG content")
         res = self.client.post(
             f"/products/{self.prod_id}/upload-photo",
@@ -227,7 +233,7 @@ class TestAdminProducts(unittest.TestCase):
         self.assertTrue(data["foto_url"].rstrip("?").endswith(".jpg"))
 
     def test_upload_photo_invalid_type_rejected(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         fake_text = io.BytesIO(b"Hello world text file")
         res = self.client.post(
             f"/products/{self.prod_id}/upload-photo",
@@ -241,7 +247,7 @@ class TestAdminProducts(unittest.TestCase):
         return self.db.query(Product).filter(Product.id == self.prod_id).first().foto_url
 
     def test_upload_photo_storage_failure_returns_503_and_keeps_old_photo(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         self.mock_sb.storage.from_.return_value.upload.side_effect = Exception("storage down")
         res = self.client.post(
             f"/products/{self.prod_id}/upload-photo",
@@ -252,7 +258,7 @@ class TestAdminProducts(unittest.TestCase):
 
     def test_upload_photo_with_mock_client_returns_503_not_local_path(self):
         from app.database import MockSupabaseClient
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         with patch("app.services.storage_upload.supabase", MockSupabaseClient()):
             res = self.client.post(
                 f"/products/{self.prod_id}/upload-photo",
@@ -262,7 +268,7 @@ class TestAdminProducts(unittest.TestCase):
         self.assertIsNone(self._stored_foto_url())
 
     def test_upload_photo_fake_png_by_extension_and_content_type_rejected(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         res = self.client.post(
             f"/products/{self.prod_id}/upload-photo",
             files={"file": ("evil.png", io.BytesIO(b"<html>not an image</html>"), "image/png")}
@@ -271,7 +277,7 @@ class TestAdminProducts(unittest.TestCase):
         self.mock_sb.storage.from_.return_value.upload.assert_not_called()
 
     def test_upload_photo_over_5mb_returns_413(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         big = b"\x89PNG\r\n\x1a\n" + b"\x00" * (5 * 1024 * 1024)
         res = self.client.post(
             f"/products/{self.prod_id}/upload-photo",
@@ -280,7 +286,7 @@ class TestAdminProducts(unittest.TestCase):
         self.assertEqual(res.status_code, 413)
 
     def test_catalog_shows_uploaded_photo(self):
-        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self._as_admin()
         test_url = "https://images.example.com/susu-cokelat.png"
         self.client.put(
             f"/products/{self.prod_id}/photo",

@@ -73,41 +73,30 @@ class JwksCache:
 
 jwks_cache = JwksCache()
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+def verify_access_token(token: str) -> Dict[str, Any]:
     """
-    FastAPI dependency to validate a user's Supabase JWT access token.
-    Fetches the public key dynamically from the JWKS endpoint, validates claims,
-    and returns the subject user_id (UUID).
-    
-    If validation fails, raises an HTTP 401 Unauthorized exception.
+    Memverifikasi JWT access token Supabase (ES256 via JWKS) dan mengembalikan klaim yang sudah
+    terverifikasi tanda tangan, exp, aud, iss, dan sub (UUID). Gagal -> HTTP 401.
     """
-    if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated"
-        )
-        
-    token = credentials.credentials
-    
     try:
         # 1. Retrieve unverified header to check alg and kid
         header = jwt.get_unverified_header(token)
         alg = header.get("alg")
         kid = header.get("kid")
-        
+
         # 2. Strict algorithm validation to prevent algorithm confusion attacks
         if alg != "ES256":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated"
             )
-            
+
         if not kid:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated"
             )
-            
+
         # 3. Retrieve JWK matching kid (from cache or refresh)
         try:
             jwk = jwks_cache.get_jwk(kid, JWKS_URL)
@@ -116,14 +105,14 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated"
             )
-            
+
         # 4. Validate JWK type
         if jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated"
             )
-            
+
         # 5. Construct Elliptic Curve public key
         try:
             public_key = jwt.PyJWK.from_dict(jwk).key
@@ -132,7 +121,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated"
             )
-            
+
         # 6. Verify signature and claims (exp, aud, iss)
         payload = jwt.decode(
             token,
@@ -147,14 +136,14 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 "require": ["exp", "sub"]
             }
         )
-        
+
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated"
             )
-            
+
         # 7. Validate that subject is a valid UUID
         try:
             uuid.UUID(user_id)
@@ -163,8 +152,8 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated"
             )
-            
-        return user_id
+
+        return payload
 
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -178,9 +167,77 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         )
 
 
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """
+    FastAPI dependency to validate a user's Supabase JWT access token.
+    Returns the subject user_id (UUID); raises HTTP 401 Unauthorized if validation fails.
+    """
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    return verify_access_token(credentials.credentials)["sub"]
+
+
 def get_admin_emails() -> set[str]:
     raw = os.getenv("ADMIN_EMAILS", "")
     return {email.strip().lower() for email in raw.split(",") if email.strip()}
+
+
+# Hasil positif Admin API dicache singkat agar tiap request admin tidak memukul Supabase.
+# Negatif/gagal tidak dicache. Batas: perubahan konfirmasi email baru terlihat setelah TTL.
+ADMIN_CONFIRM_TTL_SECONDS = 60.0
+ADMIN_API_TIMEOUT_SECONDS = 3.0
+_admin_confirm_cache: Dict[str, float] = {}
+
+
+def _email_confirmed_via_admin_api(user_id: str, email: str) -> bool:
+    """
+    True hanya bila Supabase Admin API menyatakan email_confirmed_at terisi untuk user ini.
+    Fail-closed: kunci service kosong, timeout, non-200, atau respons tak terduga = False.
+    """
+    now = time.time()
+    cache_key = f"{user_id}:{email}"
+    if _admin_confirm_cache.get(cache_key, 0.0) > now:
+        return True
+
+    service_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+    if not service_key:
+        logger.warning("SUPABASE_SERVICE_KEY is not configured; cannot confirm admin email (fail-closed).")
+        return False
+
+    try:
+        response = httpx.get(
+            f"{base_url}/auth/v1/admin/users/{user_id}",
+            headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+            timeout=ADMIN_API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        logger.warning(f"Supabase Admin API check failed ({type(e).__name__}); treating user as non-admin.")
+        return False
+
+    if not isinstance(data, dict) or not data.get("email_confirmed_at"):
+        return False
+    api_email = data.get("email")
+    if isinstance(api_email, str) and api_email.strip().lower() != email:
+        return False
+
+    for key in [k for k, expiry in _admin_confirm_cache.items() if expiry <= now]:
+        del _admin_confirm_cache[key]
+    _admin_confirm_cache[cache_key] = now + ADMIN_CONFIRM_TTL_SECONDS
+    return True
+
+
+def _is_confirmed_admin(user_id: str, token_email: Optional[str]) -> bool:
+    if not token_email:
+        return False
+    email = token_email.strip().lower()
+    if email not in get_admin_emails():
+        return False
+    return _email_confirmed_via_admin_api(user_id, email)
 
 
 def get_current_user_profile(
@@ -189,71 +246,41 @@ def get_current_user_profile(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Mengembalikan data profil lengkap pengguna aktif (user_id, email, nama, role).
-    Role ditentukan secara hirarkis:
-    1. Kolom role di database users ('admin' vs 'user').
-    2. Email terdaftar di konfigurasi env ADMIN_EMAILS.
-    3. Klaim JWT yang dikelola server (app_metadata['role'] atau role).
+    Mengembalikan data profil pengguna aktif (user_id, email, nama, role).
+    Opsi B: role 'admin' HANYA bila email pada token yang terverifikasi ada di ADMIN_EMAILS
+    (tanpa beda huruf besar/kecil dan spasi) DAN email_confirmed_at terisi menurut Supabase Admin API.
+    users.role, app_metadata.role, dan klaim role TIDAK dipakai. Tabel users hanya mengisi nama/email tampilan.
     """
-    payload = {}
+    claims: Dict[str, Any] = {}
     if credentials and credentials.credentials:
-        try:
-            payload = jwt.decode(credentials.credentials, options={"verify_signature": False})
-        except Exception:
-            payload = {}
+        claims = verify_access_token(credentials.credentials)
 
-    email = payload.get("email")
-    user_meta = payload.get("user_metadata", {})
+    token_email = claims.get("email") if isinstance(claims.get("email"), str) else None
+    user_meta = claims.get("user_metadata")
+    if not isinstance(user_meta, dict):
+        user_meta = {}
     nama = user_meta.get("name") or user_meta.get("full_name") or user_meta.get("display_name")
+    if not isinstance(nama, str):
+        nama = None
 
-    user_db = None
+    email = token_email
     try:
         user_db = db.query(User).filter(User.id == str(user_id)).first()
     except Exception as e:
         logger.warning(f"Error querying user_db for user_id '{user_id}': {e}")
         db.rollback()
+        user_db = None
     if user_db:
         if not email and user_db.email:
             email = user_db.email
         if not nama and user_db.nama:
             nama = user_db.nama
-        if getattr(user_db, "role", "user") == "admin":
-            return {
-                "user_id": user_id,
-                "email": email,
-                "nama": nama,
-                "role": "admin"
-            }
-
-    # Cek daftar ADMIN_EMAILS
-    admin_emails = get_admin_emails()
-    if email and email.lower().strip() in admin_emails:
-        return {
-            "user_id": user_id,
-            "email": email,
-            "nama": nama,
-            "role": "admin"
-        }
-
-    # Cek klaim metadata JWT Supabase
-    app_meta = payload.get("app_metadata", {})
-    jwt_role = (
-        app_meta.get("role")
-        or payload.get("role")
-    )
-    if jwt_role == "admin":
-        return {
-            "user_id": user_id,
-            "email": email,
-            "nama": nama,
-            "role": "admin"
-        }
 
     return {
         "user_id": user_id,
         "email": email,
         "nama": nama,
-        "role": getattr(user_db, "role", "user") if user_db else "user"
+        "role": "admin" if _is_confirmed_admin(user_id, token_email) else "user"
     }
 
 
