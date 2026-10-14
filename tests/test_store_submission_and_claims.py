@@ -298,7 +298,7 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
             files={"file": bad_file}
         )
         self.assertEqual(res_bad.status_code, 400)
-        self.assertIn("Format dokumen tidak valid", res_bad.json()["detail"])
+        self.assertIn("Format file tidak valid", res_bad.json()["detail"])
 
         # 2. Terima PDF valid (magic bytes %PDF)
         pdf_bytes = b"%PDF-1.4 simulated pdf document content for business permit"

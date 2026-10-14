@@ -14,20 +14,16 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field
 
-from app.database import get_db, supabase
+from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
 from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, User, StoreSubmission
 from app.services import xendit_service
 from app.routers.stores import haversine_distance
-from app.routers.products import detect_image_type
+from app.services.storage_upload import read_upload, detect_content_type, upload_image
 
 logger = logging.getLogger("rakoon_backend.ads")
 
 router = APIRouter()
-
-SUPABASE_BUCKET = "product-photos"
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 PRIVATE_DOCS_DIR = Path(__file__).resolve().parent.parent.parent / "private_storage" / "documents"
 PRIVATE_DOCS_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,54 +50,6 @@ def _get_user_latest_submission(user_id: str, db: Session) -> Optional[StoreSubm
     except Exception as e:
         logger.warning(f"Error querying StoreSubmission table: {e}")
         return None
-
-
-def detect_document_type(
-    filename: Optional[str],
-    declared_content_type: Optional[str],
-    contents: bytes
-) -> tuple[str, str]:
-    """
-    Validasi berkas dokumen (PDF, JPEG, PNG, WebP) berdasarkan magic bytes, ekstensi, dan declared MIME.
-    Mencegah executable, scripts, atau berkas berbahaya disimpan di private storage.
-    """
-    ext = Path(filename or "").suffix.lower()
-
-    # 1. Magic bytes
-    if contents.startswith(b"%PDF"):
-        return "application/pdf", ".pdf"
-    if contents.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg", ".jpg"
-    if contents.startswith(bytes([137, 80, 78, 71, 13, 10, 26, 10])):
-        return "image/png", ".png"
-    if contents.startswith(b"RIFF") and len(contents) >= 12 and contents[8:12] == b"WEBP":
-        return "image/webp", ".webp"
-
-    # 2. Extension check
-    if ext == ".pdf":
-        return "application/pdf", ".pdf"
-    if ext in [".jpg", ".jpeg"]:
-        return "image/jpeg", ".jpg"
-    if ext == ".png":
-        return "image/png", ".png"
-    if ext == ".webp":
-        return "image/webp", ".webp"
-
-    # 3. Content-Type check
-    ct = (declared_content_type or "").lower().split(";")[0].strip()
-    if ct == "application/pdf":
-        return "application/pdf", ".pdf"
-    if ct in ["image/jpeg", "image/jpg", "image/pjpeg"]:
-        return "image/jpeg", ".jpg"
-    if ct in ["image/png", "image/x-png"]:
-        return "image/png", ".png"
-    if ct == "image/webp":
-        return "image/webp", ".webp"
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Format dokumen tidak valid. Gunakan PDF, JPEG, PNG, atau WebP."
-    )
 
 
 PRICING_PACKAGES = [
@@ -1307,20 +1255,11 @@ async def upload_claim_document(
 ):
     """
     Mengunggah dokumen legalitas usaha (NIB, dsb) secara aman ke private storage.
-    Hanya menerima berkas PDF atau gambar scan (JPEG, PNG, WebP) maks 5MB.
+    Hanya menerima berkas PDF atau gambar scan (JPEG, PNG, WebP) maks 5MB; tipe dicek dari isi berkas.
+    Lokasi simpan (private_storage) dan awalan nama doc_{user_id}_ dipertahankan sampai gelombang d.
     """
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Berkas dokumen kosong.")
-
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ukuran file terlalu besar. Maksimum 5MB.")
-
-    content_type, ext = detect_document_type(
-        filename=file.filename,
-        declared_content_type=file.content_type,
-        contents=contents
-    )
+    contents = await read_upload(file)
+    content_type, ext = detect_content_type(contents, allow_pdf=True)
 
     filename = f"doc_{user_id}_{uuid.uuid4().hex[:16]}{ext}"
     target_path = PRIVATE_DOCS_DIR / filename
@@ -1337,32 +1276,9 @@ async def upload_claim_photo(
 ):
     """
     Mengunggah foto tampak depan toko yang memperlihatkan papan nama toko.
+    Storage gagal -> 502/503 (tidak ada URL pengganti).
     """
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Berkas foto kosong.")
-
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ukuran file terlalu besar. Maksimum 5MB.")
-
-    content_type, ext = detect_image_type(
-        filename=file.filename,
-        declared_content_type=file.content_type,
-        contents=contents
-    )
-
-    filename = f"claim_photo_{uuid.uuid4().hex}{ext}"
-    try:
-        supabase.storage.from_(SUPABASE_BUCKET).upload(
-            filename,
-            contents,
-            {"content-type": content_type, "upsert": "true"}
-        )
-        photo_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename).rstrip("?")
-        return {"photo_url": photo_url}
-    except Exception as e:
-        logger.warning(f"Failed to upload photo to Supabase storage: {e}. Using fallback path.")
-        return {"photo_url": f"https://images.unsplash.com/photo-1578916171728-46686eac8d58?auto=format&fit=crop&w=800&q=80"}
+    return {"photo_url": await upload_image(file, prefix="claim_photo_")}
 
 
 @router.get("/documents/{filename}")
@@ -1442,7 +1358,7 @@ async def upload_ad_banner(
     db: Session = Depends(get_db)
 ):
     """
-    Mengunggah berkas foto flyer iklan promo ke Supabase Storage.
+    Mengunggah berkas foto flyer iklan promo ke Supabase Storage. Storage gagal -> 502/503.
     """
     owner = (
         db.query(StoreOwner)
@@ -1459,39 +1375,8 @@ async def upload_ad_banner(
             detail="Hanya pemilik toko terverifikasi yang dapat mengunggah banner iklan."
         )
 
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Berkas foto flyer kosong."
-        )
-
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ukuran file terlalu besar. Maksimum 5MB."
-        )
-
-    content_type, ext = detect_image_type(
-        filename=file.filename,
-        declared_content_type=file.content_type,
-        contents=contents
-    )
-
-    filename = f"ad_{uuid.uuid4().hex}{ext}"
-
-    try:
-        supabase.storage.from_(SUPABASE_BUCKET).upload(
-            filename,
-            contents,
-            {"content-type": content_type, "upsert": "true"}
-        )
-        banner_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename).rstrip("?")
-        return {"banner_url": banner_url}
-    except Exception as e:
-        # Fallback local URL if Supabase credentials in development mock mode
-        logger.warning(f"Failed to upload to Supabase: {e}. Using fallback path.")
-        return {"banner_url": f"https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80"}
+    banner_url = await upload_image(file, prefix="ad_")
+    return {"banner_url": banner_url}
 
 
 @router.post("/campaigns", response_model=HomeBannerItem, status_code=status.HTTP_201_CREATED)
