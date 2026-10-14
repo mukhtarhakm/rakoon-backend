@@ -87,11 +87,15 @@ def get_candidate_stores(db: Session, lat: float, lng: float, radius_km: float) 
     ).all()
 
 
+# Batas radius pencarian (km) untuk semua endpoint berbasis lokasi (P7-08).
+MAX_SEARCH_RADIUS_KM = 100.0
+
+
 @router.get("/nearby", response_model=NearbyStoresResponse, status_code=status.HTTP_200_OK)
 def get_nearby_stores(
-    lat: float = Query(..., description="Latitude koordinat pengguna"),
-    lng: float = Query(..., description="Longitude koordinat pengguna"),
-    radius_km: float = Query(5.0, description="Radius pencarian dalam kilometer"),
+    lat: float = Query(..., ge=-90, le=90, description="Latitude koordinat pengguna"),
+    lng: float = Query(..., ge=-180, le=180, description="Longitude koordinat pengguna"),
+    radius_km: float = Query(5.0, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian dalam kilometer"),
     db: Session = Depends(get_db)
 ):
     """

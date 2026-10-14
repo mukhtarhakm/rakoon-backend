@@ -86,15 +86,15 @@ class TestConfirmPriceBand(unittest.TestCase):
             "items": [{"nama_produk": nama, "harga": harga, "ukuran": 5.0, "satuan": "kg", "kategori": "Makanan Pokok"}],
         })
 
-    def _last_status(self, product):
+    def _last_status(self, product, harga=None):
+        """Status entri terakhir milik pengguna; `harga` memilih entri persis (timestamp bisa kembar di Windows)."""
         self.db.expire_all()
-        entry = (
-            self.db.query(PriceEntry)
-            .filter(PriceEntry.product_id == product.id, PriceEntry.sumber_user_id == self.current_user)
-            .order_by(PriceEntry.timestamp.desc())
-            .first()
+        query = self.db.query(PriceEntry).filter(
+            PriceEntry.product_id == product.id, PriceEntry.sumber_user_id == self.current_user
         )
-        return entry.status_verifikasi
+        if harga is not None:
+            query = query.filter(PriceEntry.harga == harga)
+        return query.order_by(PriceEntry.timestamp.desc()).first().status_verifikasi
 
     def test_price_inside_the_band_is_verified(self):
         product = self._seed_product()
@@ -128,11 +128,14 @@ class TestConfirmPriceBand(unittest.TestCase):
         self._seed_product(prices=(1, 1, 1, 1, 1), status=VerificationStatus.PENDING)
         self._seed_product(prices=(1, 1, 1), status=VerificationStatus.REJECTED)
         self._confirm(product.nama, 9000)
-        self.assertEqual(self._last_status(product), VerificationStatus.VERIFIED)
+        self.assertEqual(self._last_status(product, 9000), VerificationStatus.VERIFIED)
         # suntikan murah berulang tidak menggeser median sehingga tetap pending
         for _ in range(3):
             self._confirm(product.nama, 2000)
-            self.assertEqual(self._last_status(product), VerificationStatus.PENDING)
+        self.db.expire_all()
+        injected = self.db.query(PriceEntry).filter(PriceEntry.harga == 2000).all()
+        self.assertEqual(len(injected), 3)
+        self.assertEqual({e.status_verifikasi for e in injected}, {VerificationStatus.PENDING})
 
     def test_without_enough_verified_samples_the_price_stays_verified(self):
         # Batas yang diketahui: produk baru/sedikit data tidak punya median yang bisa dipercaya.

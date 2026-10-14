@@ -12,7 +12,7 @@ from app.dependencies import get_current_user, get_current_admin_user
 from app.services import price_history_service
 from app.services.current_price import get_current_prices
 from app.services.price_history_service import DateRange
-from app.routers.stores import get_nearby_stores
+from app.routers.stores import get_nearby_stores, MAX_SEARCH_RADIUS_KM
 from app.services.errors import safe_error
 
 logger = logging.getLogger("rakoon_backend.price")
@@ -266,9 +266,9 @@ def get_price_history(
 @router.get("/compare/{product_id}", response_model=PriceCompareResponse)
 def get_price_comparison(
     product_id: str,
-    lat: float = Query(..., description="Latitude koordinat pengguna"),
-    lng: float = Query(..., description="Longitude koordinat pengguna"),
-    radius_km: float = Query(5.0, description="Radius pencarian dalam kilometer"),
+    lat: float = Query(..., ge=-90, le=90, description="Latitude koordinat pengguna"),
+    lng: float = Query(..., ge=-180, le=180, description="Longitude koordinat pengguna"),
+    radius_km: float = Query(5.0, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian dalam kilometer"),
     db: Session = Depends(get_db)
 ):
     """

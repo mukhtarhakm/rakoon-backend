@@ -1,6 +1,6 @@
 import logging
 from typing import Optional, List, Tuple, Dict
-from fastapi import APIRouter, status, HTTPException, Depends
+from fastapi import APIRouter, status, HTTPException, Depends, Query
 
 from app.models.schemas import (
     RecommendationCandidate,
@@ -18,6 +18,7 @@ from app.services.errors import safe_error
 from app.models.db_models import Product, Store
 from app.services.current_price import CurrentPrice, get_current_prices, pick_cheapest
 from sqlalchemy.orm import Session
+from app.routers.stores import MAX_SEARCH_RADIUS_KM
 
 logger = logging.getLogger("rakoon_backend.recommendation")
 
@@ -323,13 +324,16 @@ def evaluate_recommendation(payload: RecommendationRequest):
         )
 
 
+RECOMMENDED_MAX_LIMIT = 50
+
+
 @router.get("/recommended-products", response_model=List[RecommendedProductItem], status_code=status.HTTP_200_OK)
 @router.get("/recommended", response_model=List[RecommendedProductItem], status_code=status.HTTP_200_OK)
 def get_recommended_products(
-    lat: Optional[float] = None,
-    lng: Optional[float] = None,
-    radius_km: float = 1.0,
-    limit: int = 10,
+    lat: Optional[float] = Query(None, ge=-90, le=90, description="Latitude pengguna"),
+    lng: Optional[float] = Query(None, ge=-180, le=180, description="Longitude pengguna"),
+    radius_km: float = Query(1.0, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian dalam kilometer"),
+    limit: int = Query(10, ge=1, le=RECOMMENDED_MAX_LIMIT, description="Jumlah maksimum produk"),
     db: Session = Depends(get_db),
 ):
     """
