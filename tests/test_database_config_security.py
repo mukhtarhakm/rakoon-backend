@@ -259,5 +259,61 @@ class TestDatabaseConfigSecurity(unittest.TestCase):
             self.assertNotIn(sensitive_password, err_msg)
 
 
+class TestSupabaseClientStartupGuard(unittest.TestCase):
+    """Kredensial Supabase kosong/invalid tidak boleh jatuh diam-diam ke klien Mock di produksi (P2-13)."""
+
+    VALID_LOOKING_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl"
+
+    def _import_database(self, **env_overrides):
+        env = dict(os.environ)
+        env.update({
+            "DATABASE_URL": "sqlite:///:memory:",
+            "SUPABASE_URL": "https://mock.supabase.co",
+            "RAKOON_ENV": "",
+            "ENVIRONMENT": "",
+        })
+        env.update(env_overrides)
+        code = (
+            "import app.database as d\n"
+            "print('CLIENT=' + type(d.supabase).__name__)\n"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, env=env, cwd=backend_dir,
+        )
+
+    def test_production_with_empty_service_key_fails_start(self):
+        res = self._import_database(RAKOON_ENV="production", SUPABASE_SERVICE_KEY="")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("SUPABASE_SERVICE_KEY", res.stderr)
+
+    def test_production_with_invalid_service_key_fails_start_without_leaking_it(self):
+        res = self._import_database(RAKOON_ENV="production", SUPABASE_SERVICE_KEY="NotAJwtSecretValue123")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("SUPABASE_SERVICE_KEY", res.stderr)
+        self.assertNotIn("NotAJwtSecretValue123", res.stderr)
+
+    def test_production_declared_via_environment_variable_also_fails_start(self):
+        res = self._import_database(ENVIRONMENT="production", SUPABASE_SERVICE_KEY="")
+        self.assertNotEqual(res.returncode, 0)
+
+    def test_production_with_valid_looking_key_starts_with_real_client(self):
+        res = self._import_database(RAKOON_ENV="production", SUPABASE_SERVICE_KEY=self.VALID_LOOKING_KEY)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("CLIENT=MockSupabaseClient", res.stdout)
+
+    def test_non_production_without_key_still_starts_with_mock_client(self):
+        for env_name in ("", "development", "test"):
+            with self.subTest(env=env_name):
+                res = self._import_database(RAKOON_ENV=env_name, SUPABASE_SERVICE_KEY="")
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn("CLIENT=MockSupabaseClient", res.stdout)
+
+    def test_mock_client_refuses_storage_access(self):
+        from app.database import MockSupabaseClient
+        with self.assertRaises(RuntimeError):
+            MockSupabaseClient().storage
+
+
 if __name__ == "__main__":
     unittest.main()

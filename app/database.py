@@ -105,7 +105,25 @@ class MockSupabaseClient:
     def table(self, table_name):
         return MockQueryBuilder(table_name, self.db_store)
 
+    @property
+    def storage(self):
+        # Storage tidak pernah dipura-purakan: unggahan harus gagal, bukan "sukses palsu" (P2-13).
+        raise RuntimeError("Supabase Storage tidak dikonfigurasi (klien Mock aktif).")
+
 supabase: Client
+
+
+def _is_production() -> bool:
+    env = (os.getenv("RAKOON_ENV") or os.getenv("ENVIRONMENT") or "").strip().lower()
+    return env in ("production", "prod")
+
+
+def _fail_production_without_supabase(reason: str):
+    raise RuntimeError(
+        f"FATAL STARTUP ERROR: {reason} Supabase wajib dikonfigurasi saat RAKOON_ENV/ENVIRONMENT=production; "
+        "klien Mock tidak boleh dipakai di produksi."
+    )
+
 
 if supabase_url and supabase_key:
     try:
@@ -115,9 +133,13 @@ if supabase_url and supabase_key:
         supabase = create_client(supabase_url, supabase_key)
         logger.info("Successfully initialized legacy Supabase client.")
     except Exception as e:
-        logger.warning(f"Error initializing Supabase client: {str(e)}. Falling back to mock client.")
+        if _is_production():
+            _fail_production_without_supabase("SUPABASE_SERVICE_KEY tidak valid atau klien gagal dibuat.")
+        logger.warning(f"Error initializing Supabase client: {type(e).__name__}. Falling back to mock client.")
         supabase = MockSupabaseClient()
 else:
+    if _is_production():
+        _fail_production_without_supabase("SUPABASE_URL atau SUPABASE_SERVICE_KEY kosong.")
     logger.warning("Supabase credentials missing. Falling back to mock client.")
     supabase = MockSupabaseClient()
 
