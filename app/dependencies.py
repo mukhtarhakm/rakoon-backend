@@ -29,28 +29,51 @@ EXPECTED_ISSUER = f"{base_url}/auth/v1"
 # Define security dependency (auto_error=False to customize error formatting)
 security = HTTPBearer(auto_error=False)
 
+class JwksUnavailableError(Exception):
+    """JWKS tidak bisa diambil dan tidak ada kunci layak pakai di cache (dipetakan ke HTTP 503)."""
+
+
 class JwksCache:
     """
-    Simple in-memory cache for JWKS keys to optimize authentication performance.
+    Cache JWKS in-memory. Kunci lama boleh dipakai saat refresh gagal, tetapi hanya sampai
+    max_stale_seconds. Fetch sinkron dibatasi (min_refetch_seconds) setelah kegagalan dan untuk
+    kid tak dikenal, supaya request anonim dengan kid acak tidak memaksa panggilan HTTP berulang.
+    Batas: kunci baru hasil rotasi baru dikenali setelah jeda min_refetch_seconds dari fetch terakhir.
     """
-    def __init__(self, ttl_seconds: int = 300):
+    def __init__(self, ttl_seconds: int = 300, max_stale_seconds: int = 3600, min_refetch_seconds: int = 30):
         self.ttl = ttl_seconds
+        self.max_stale = max_stale_seconds
+        self.min_refetch = min_refetch_seconds
         self.keys: Dict[str, Dict[str, Any]] = {}
         self.last_fetched: float = 0.0
+        self.last_failure: float = 0.0
 
     def get_jwk(self, kid: str, jwks_url: str) -> Dict[str, Any]:
         now = time.time()
+        cached = self.keys.get(kid)
         # Return cached key if it exists and cache is not expired
-        if kid in self.keys and (now - self.last_fetched) < self.ttl:
-            return self.keys[kid]
+        if cached is not None and (now - self.last_fetched) < self.ttl:
+            return cached
 
-        # Refresh cache
-        self._refresh(jwks_url)
-        
-        if kid in self.keys:
-            return self.keys[kid]
-            
+        if self._may_fetch(now, kid_known=cached is not None):
+            self._refresh(jwks_url)
+            now = time.time()
+            cached = self.keys.get(kid)
+
+        if cached is not None:
+            if (now - self.last_fetched) < self.max_stale:
+                return cached
+            raise JwksUnavailableError("Cached JWKS key exceeded the maximum allowed age.")
+        if not self.keys:
+            raise JwksUnavailableError("JWKS is unavailable and the cache is empty.")
         raise KeyError(f"Key ID {kid} not found in JWKS.")
+
+    def _may_fetch(self, now: float, kid_known: bool) -> bool:
+        if (now - self.last_failure) < self.min_refetch:
+            return False
+        if not kid_known and self.keys and (now - self.last_fetched) < self.min_refetch:
+            return False
+        return True
 
     def _refresh(self, jwks_url: str):
         try:
@@ -58,18 +81,19 @@ class JwksCache:
             response = httpx.get(jwks_url, timeout=5.0)
             response.raise_for_status()
             data = response.json()
-            
+
             new_keys = {}
             for key in data.get("keys", []):
                 key_id = key.get("kid")
                 if key_id:
                     new_keys[key_id] = key
-                    
+
             self.keys = new_keys
             self.last_fetched = time.time()
         except Exception as e:
-            logger.error(f"Error fetching JWKS from Supabase: {e}")
-            # Retain old keys on transient network failure to avoid downtime
+            self.last_failure = time.time()
+            logger.error(f"Error fetching JWKS from Supabase: {type(e).__name__}")
+            # Retain old keys on transient network failure (bounded by max_stale in get_jwk)
 
 jwks_cache = JwksCache()
 
@@ -161,6 +185,21 @@ def verify_access_token(token: str) -> Dict[str, Any]:
             detail="Not authenticated"
         )
     except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    except HTTPException:
+        raise
+    except JwksUnavailableError as e:
+        logger.error(f"Authentication unavailable: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service temporarily unavailable"
+        )
+    except Exception as e:
+        # InvalidKeyError, PyJWKError, TypeError pada klaim (mis. iat null), dll: token tak bisa dipercaya -> 401, bukan 500.
+        logger.warning(f"Token verification failed unexpectedly ({type(e).__name__}).")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated"
