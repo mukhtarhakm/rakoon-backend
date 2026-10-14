@@ -43,6 +43,14 @@ def is_valid_uuid(val: str) -> bool:
     except (ValueError, TypeError, AttributeError):
         return False
 
+
+def canonical_uuid(val) -> Optional[str]:
+    """Bentuk kanonik (huruf kecil, bertanda hubung) dari UUID valid apa pun; None bila bukan UUID."""
+    try:
+        return str(uuid.UUID(str(val)))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
 @router.post("/recommend", response_model=BudgetRecommendResponse, status_code=status.HTTP_200_OK)
 def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Depends(get_db)):
     """
@@ -57,7 +65,7 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
         # 1. Peta kuantitas permintaan pengguna per product_id (string key)
         qty_map: Dict[str, int] = {}
         for item in payload.items:
-            pid_str = str(item.product_id)
+            pid_str = canonical_uuid(item.product_id) or str(item.product_id)
             qty_map[pid_str] = qty_map.get(pid_str, 0) + item.qty
 
         requested_pids = list(qty_map.keys())
@@ -68,7 +76,7 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
             )
 
         # Filter valid UUIDs for DB query
-        valid_uuid_pids = [pid for pid in requested_pids if is_valid_uuid(pid)]
+        valid_uuid_pids = [pid for pid in requested_pids if canonical_uuid(pid)]
         total_requested_count = len(requested_pids)
 
         # Jika ada barang yang ID-nya bukan UUID valid, barang tersebut dipastikan tidak ada di DB (bisa membatalkan 100% full match)
@@ -251,6 +259,16 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
 
         # Skenario C: Tidak ada toko yang memuat 100% barang di database
         availabilities = []
+        missing_pids = [
+            pid for pid in requested_pids
+            if not any(str(row.product_id) == pid for row in query_results)
+        ]
+        # Satu query untuk semua nama produk yang tidak punya harga (bukan satu query per produk)
+        missing_valid = [pid for pid in missing_pids if canonical_uuid(pid)]
+        missing_names = (
+            {str(p.id): p.nama for p in db.query(Product).filter(Product.id.in_(missing_valid)).all()}
+            if missing_valid else {}
+        )
         for pid in requested_pids:
             product_rows = [row for row in query_results if str(row.product_id) == pid]
             if product_rows:
@@ -265,11 +283,9 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
                     stale=cheapest_row.stale,
                 ))
             else:
-                prod_db = db.query(Product).filter(Product.id == pid).first()
-                prod_name = prod_db.nama if prod_db else "Produk Tidak Dikenal"
                 availabilities.append(ProductAvailability(
                     product_id=pid,
-                    nama_produk=prod_name,
+                    nama_produk=missing_names.get(pid, "Produk Tidak Dikenal"),
                     is_available=False,
                     harga_terendah=None,
                     toko_terendah=None

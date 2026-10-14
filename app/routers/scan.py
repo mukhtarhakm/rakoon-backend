@@ -31,6 +31,7 @@ from app.models.db_models import Product, PriceEntry, Store, ScanSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.services.errors import safe_error
+from app.routers.recommendation import canonical_unit
 from app.services.vision_service import process_shelf_image
 
 
@@ -284,7 +285,7 @@ def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> Confi
             new_product = Product(
                 nama=clean_name,
                 ukuran=item.ukuran,
-                satuan=item.satuan,
+                satuan=canonical_unit(item.satuan),
                 kategori=item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
             )
             db.add(new_product)

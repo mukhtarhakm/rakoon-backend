@@ -72,6 +72,25 @@ def normalize_unit_and_dimension(satuan: Optional[str], ukuran: float) -> Option
     normalized_ukuran = ukuran * multiplier
     return dimension, base_unit, normalized_ukuran
 
+_CANONICAL_UNIT = {
+    ("volume", 1.0): "ml", ("volume", 1000.0): "l",
+    ("weight", 1.0): "g", ("weight", 1000.0): "kg",
+    ("count", 1.0): "pcs",
+}
+
+
+def canonical_unit(satuan: Optional[str]) -> Optional[str]:
+    """Satu ejaan per satuan yang dikenal (gr/gram -> g, liter -> l, ...); satuan lain dikembalikan apa adanya (trim)."""
+    if satuan is None or not str(satuan).strip():
+        return None
+    clean = str(satuan).strip()
+    mapping = UNIT_MAPPINGS.get(clean.lower())
+    if not mapping:
+        return clean
+    dimension, _base, multiplier = mapping
+    return _CANONICAL_UNIT[(dimension, multiplier)]
+
+
 def format_unit_price(harga_per_unit: float, base_unit: str) -> str:
     """
     Format harga per unit menjadi teks Rupiah yang rapi (pemisah ribuan titik, desimal koma).

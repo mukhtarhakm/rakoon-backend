@@ -279,13 +279,19 @@ class RecommendationResponse(BaseModel):
 # FEATURE: SMART BUDGET SHOPPING ASSISTANT SCHEMAS
 # ==============================================================================
 
+# Batas input asisten anggaran (anti DoS, P8-05).
+MAX_BUDGET_ITEMS = 50
+MAX_ITEM_QTY = 99
+MAX_BUDGET_RUPIAH = 1_000_000_000
+
+
 class BudgetItemInput(BaseModel):
     product_id: Union[int, str, UUID] = Field(..., description="ID produk yang ingin dibeli")
-    qty: int = Field(..., gt=0, description="Kuantitas/jumlah produk yang dibeli (harus > 0)")
+    qty: int = Field(..., gt=0, le=MAX_ITEM_QTY, description="Kuantitas/jumlah produk yang dibeli (1-99)")
 
 class BudgetRecommendRequest(BaseModel):
-    budget: float = Field(..., gt=0, description="Total budget yang dialokasikan pengguna dalam Rupiah")
-    items: List[BudgetItemInput] = Field(..., min_length=1, description="Daftar barang dan kuantitas yang dibutuhkan")
+    budget: float = Field(..., gt=0, le=MAX_BUDGET_RUPIAH, allow_inf_nan=False, description="Total budget yang dialokasikan pengguna dalam Rupiah")
+    items: List[BudgetItemInput] = Field(..., min_length=1, max_length=MAX_BUDGET_ITEMS, description="Daftar barang dan kuantitas yang dibutuhkan (1-50)")
 
 class BudgetItemResult(BaseModel):
     product_id: str = Field(..., description="ID produk")
