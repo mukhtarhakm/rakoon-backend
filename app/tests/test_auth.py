@@ -952,3 +952,39 @@ class TestAuth(unittest.TestCase):
         token = jwt.encode(payload, None, algorithm="none", headers={"kid": self.test_kid})
         self.assertEqual(self._get_protected(token).status_code, 401)
         self.assertEqual(self.jwks_calls, [])
+
+    # --- 6. /auth/test-protected hanya untuk non-produksi (P1-11) -------------------------------------
+
+    @patch("app.dependencies.httpx.get")
+    def test_test_protected_is_disabled_in_production(self, mock_get):
+        self._prepare_http(mock_get)
+        token = self._create_token()
+        for env in (
+            {"RAKOON_ENV": "production", "ENVIRONMENT": ""},
+            {"RAKOON_ENV": "", "ENVIRONMENT": "production"},
+            {"RAKOON_ENV": "PROD", "ENVIRONMENT": ""},
+        ):
+            with self.subTest(env=env), patch.dict(os.environ, env):
+                self.assertEqual(self._get_protected(token).status_code, 404)
+                self.assertEqual(self.client.get("/auth/test-protected").status_code, 404)  # tanpa token juga 404
+
+    @patch("app.dependencies.httpx.get")
+    def test_test_protected_works_outside_production(self, mock_get):
+        self._prepare_http(mock_get)
+        token = self._create_token()
+        for env in (
+            {"RAKOON_ENV": "", "ENVIRONMENT": ""},
+            {"RAKOON_ENV": "development", "ENVIRONMENT": ""},
+            {"RAKOON_ENV": "staging", "ENVIRONMENT": ""},
+        ):
+            with self.subTest(env=env), patch.dict(os.environ, env):
+                response = self._get_protected(token)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"user_id": self.test_uuid})
+                self.assertEqual(self.client.get("/auth/test-protected").status_code, 401)
+
+    @patch("app.dependencies.httpx.get")
+    def test_auth_me_stays_available_in_production(self, mock_get):
+        self._prepare_http(mock_get)
+        with patch.dict(os.environ, {"RAKOON_ENV": "production", "ENVIRONMENT": ""}):
+            self.assertEqual(self._me(self._create_token()).status_code, 200)
