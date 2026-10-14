@@ -881,6 +881,118 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertEqual(matching[0]["payment_status"], "paid")
         self.assertEqual(matching[0]["status"], "active")
 
+    # ---- P4-01: bayar ulang setelah invoice EXPIRED/FAILED ----
+
+    @staticmethod
+    def _fake_invoice(**kwargs):
+        ext = kwargs["external_id"]
+        return {
+            "id": f"xinv_{ext}",
+            "external_id": ext,
+            "status": "PENDING",
+            "invoice_url": f"https://checkout.xendit.co/{ext}",
+            "amount": kwargs["amount"],
+        }
+
+    def _txs(self, campaign_id):
+        self.db.expire_all()
+        return (
+            self.db.query(PaymentTransaction)
+            .filter(PaymentTransaction.campaign_id == campaign_id)
+            .order_by(PaymentTransaction.created_at)
+            .all()
+        )
+
+    def _set_first_tx(self, campaign_id, **fields):
+        tx = self._txs(campaign_id)[0]
+        for k, v in fields.items():
+            setattr(tx, k, v)
+        self.db.commit()
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_29_repay_after_expired_invoice_creates_new_external_id(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        campaign_data = self._create_pending_campaign()
+        cid = campaign_data["id"]
+        first = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(first.status_code, 200)
+
+        self._set_first_tx(cid, status="EXPIRED")
+
+        again = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.json()["status"], "PENDING")
+        self.assertNotEqual(again.json()["external_id"], first.json()["external_id"])
+        self.assertNotEqual(again.json()["invoice_url"], first.json()["invoice_url"])
+        self.assertEqual(mock_create_inv.call_count, 2)
+        ext_ids = [c[1]["external_id"] for c in mock_create_inv.call_args_list]
+        self.assertEqual(len(set(ext_ids)), 2)
+
+        txs = self._txs(cid)
+        self.assertEqual([t.status for t in txs], ["EXPIRED", "PENDING"])
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.assertEqual(campaign.payment_ref, again.json()["external_id"])
+        self.assertEqual(campaign.status, "pending_payment")
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_30_repay_after_failed_invoice_succeeds(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        cid = self._create_pending_campaign()["id"]
+        self.client.post(f"/ads/campaigns/{cid}/pay")
+        self._set_first_tx(cid, status="FAILED")
+
+        again = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.json()["status"], "PENDING")
+        self.assertEqual(len(self._txs(cid)), 2)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_31_two_consecutive_pay_clicks_after_expired_create_one_pending_invoice(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        cid = self._create_pending_campaign()["id"]
+        self.client.post(f"/ads/campaigns/{cid}/pay")
+        self._set_first_tx(cid, status="EXPIRED")
+
+        res1 = self.client.post(f"/ads/campaigns/{cid}/pay")
+        res2 = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual((res1.status_code, res2.status_code), (200, 200))
+        self.assertEqual(res1.json()["invoice_url"], res2.json()["invoice_url"])
+        self.assertEqual(mock_create_inv.call_count, 2)  # 1 awal + 1 ulang, bukan 3
+        self.assertEqual(len([t for t in self._txs(cid) if t.status == "PENDING"]), 1)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_32_pending_invoice_older_than_invoice_lifetime_is_not_reused(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        cid = self._create_pending_campaign()["id"]
+        first = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self._set_first_tx(cid, created_at=datetime.now(timezone.utc) - timedelta(hours=25))
+
+        again = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(again.status_code, 200)
+        self.assertNotEqual(again.json()["external_id"], first.json()["external_id"])
+        self.assertEqual(mock_create_inv.call_count, 2)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_33_webhook_for_repay_invoice_activates_campaign(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        cid = self._create_pending_campaign()["id"]
+        self.client.post(f"/ads/campaigns/{cid}/pay")
+        self._set_first_tx(cid, status="EXPIRED")
+        again = self.client.post(f"/ads/campaigns/{cid}/pay").json()
+
+        res = self.client.post(
+            "/ads/webhook/xendit",
+            json={"id": again["xendit_invoice_id"], "external_id": again["external_id"], "status": "PAID",
+                  "paid_amount": 15000, "currency": "IDR"},
+            headers={"x-callback-token": CALLBACK_TOKEN},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "success")
+        self.db.expire_all()
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.assertEqual((campaign.status, campaign.payment_status), ("active", "paid"))
+
 
 if __name__ == "__main__":
     unittest.main()

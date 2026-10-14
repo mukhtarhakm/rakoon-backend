@@ -1514,6 +1514,25 @@ def get_campaign_detail(
     )
 
 
+# Sama dengan invoice_duration default di xendit_service.create_invoice (86400 dtk).
+INVOICE_LIFETIME = timedelta(seconds=86400)
+
+
+def _find_reusable_pending_tx(db: Session, campaign_id, now: datetime) -> Optional[PaymentTransaction]:
+    """Transaksi PENDING dengan invoice yang belum melewati masa berlakunya (idempotensi checkout)."""
+    candidates = (
+        db.query(PaymentTransaction)
+        .filter(
+            PaymentTransaction.campaign_id == campaign_id,
+            PaymentTransaction.status == "PENDING",
+            PaymentTransaction.invoice_url.isnot(None),
+        )
+        .order_by(PaymentTransaction.created_at.desc())
+        .all()
+    )
+    return next((tx for tx in candidates if _ensure_utc(tx.created_at) + INVOICE_LIFETIME > now), None)
+
+
 @router.post("/campaigns/{campaign_id}/pay", response_model=InitiatePaymentResponse, status_code=status.HTTP_200_OK)
 def initiate_campaign_payment(
     campaign_id: str,
@@ -1574,17 +1593,8 @@ def initiate_campaign_payment(
             detail=f"Payment gateway Xendit belum dikonfigurasi: {e}"
         )
 
-    # Idempotensi: jika sudah ada transaksi PENDING dengan invoice_url yang valid, gunakan kembali
-    existing_tx = (
-        db.query(PaymentTransaction)
-        .filter(
-            PaymentTransaction.campaign_id == campaign.id,
-            PaymentTransaction.status == "PENDING",
-            PaymentTransaction.invoice_url.isnot(None),
-        )
-        .order_by(PaymentTransaction.created_at.desc())
-        .first()
-    )
+    # Idempotensi: invoice PENDING yang masih berlaku dipakai ulang; EXPIRED/FAILED/kedaluwarsa tidak.
+    existing_tx = _find_reusable_pending_tx(db, campaign.id, now)
     if existing_tx:
         return InitiatePaymentResponse(
             campaign_id=str(campaign.id),
@@ -1597,8 +1607,10 @@ def initiate_campaign_payment(
             expiry_date=None,
         )
 
-    external_id = campaign.payment_ref or f"INV-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-    if not campaign.payment_ref:
+    # external_id unik per percobaan: payment_ref dipakai untuk percobaan pertama, sisanya diganti baru.
+    external_id = campaign.payment_ref
+    if not external_id or db.query(PaymentTransaction.id).filter(PaymentTransaction.external_id == external_id).first():
+        external_id = f"INV-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
         campaign.payment_ref = external_id
         db.commit()
 
@@ -1637,16 +1649,7 @@ def initiate_campaign_payment(
     except IntegrityError:
         db.rollback()
         logger.info(f"Concurrent checkout race condition detected for {external_id}, reconciling...")
-        existing_tx = (
-            db.query(PaymentTransaction)
-            .filter(
-                PaymentTransaction.campaign_id == campaign.id,
-                PaymentTransaction.status == "PENDING",
-                PaymentTransaction.invoice_url.isnot(None),
-            )
-            .order_by(PaymentTransaction.created_at.desc())
-            .first()
-        )
+        existing_tx = _find_reusable_pending_tx(db, campaign.id, now)
         if existing_tx:
             return InitiatePaymentResponse(
                 campaign_id=str(campaign.id),
