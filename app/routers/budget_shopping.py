@@ -1,5 +1,6 @@
 import logging
 import uuid
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from sqlalchemy import func
 
 from app.database import get_db
 from app.services.errors import safe_error
+from app.services.current_price import get_current_prices
 from app.models.db_models import Product, PriceEntry, Store
 from app.models.schemas import (
     BudgetRecommendRequest,
@@ -72,44 +74,33 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
         # Jika ada barang yang ID-nya bukan UUID valid, barang tersebut dipastikan tidak ada di DB (bisa membatalkan 100% full match)
         query_results = []
         if valid_uuid_pids:
-            # 2. Subquery untuk mengambil timestamp terbaru per (product_id, store_id) - HANYA status_verifikasi == "verified"
-            subquery = (
-                db.query(
-                    PriceEntry.product_id.label("pid"),
-                    PriceEntry.store_id.label("sid"),
-                    func.max(PriceEntry.timestamp).label("max_ts")
-                )
-                .filter(
-                    PriceEntry.product_id.in_(valid_uuid_pids),
-                    func.lower(PriceEntry.status_verifikasi) == VerificationStatus.VERIFIED.value
-                )
-                .group_by(PriceEntry.product_id, PriceEntry.store_id)
-                .subquery()
-            )
-
-            # 3. Query harga terbaru yang verified beserta info Product dan Store
-            query_results = (
-                db.query(
-                    PriceEntry.product_id,
-                    PriceEntry.store_id,
-                    PriceEntry.harga,
-                    Product.nama.label("nama_produk"),
-                    Store.nama.label("nama_toko"),
-                    Store.alamat.label("alamat_toko"),
-                    Store.lat.label("lat_toko"),
-                    Store.lng.label("lng_toko")
-                )
-                .join(
-                    subquery,
-                    (PriceEntry.product_id == subquery.c.pid) &
-                    (PriceEntry.store_id == subquery.c.sid) &
-                    (PriceEntry.timestamp == subquery.c.max_ts)
-                )
-                .join(Product, PriceEntry.product_id == Product.id)
-                .join(Store, PriceEntry.store_id == Store.id)
-                .filter(func.lower(PriceEntry.status_verifikasi) == VerificationStatus.VERIFIED.value)
-                .all()
-            )
+            # 2. Harga terkini per (produk, toko): terbaru, verified saja, tanpa jendela waktu (stale ditandai)
+            current = get_current_prices(db, valid_uuid_pids)
+            if current:
+                store_rows = {
+                    str(s.id): s
+                    for s in db.query(Store).filter(Store.id.in_({sid for (_pid, sid) in current})).all()
+                }
+                product_rows = {
+                    str(p.id): p
+                    for p in db.query(Product).filter(Product.id.in_({pid for (pid, _sid) in current})).all()
+                }
+                for (pid, sid), price in sorted(current.items()):
+                    store, product = store_rows.get(sid), product_rows.get(pid)
+                    if store is None or product is None:
+                        continue
+                    query_results.append(SimpleNamespace(
+                        product_id=pid,
+                        store_id=sid,
+                        harga=price.harga,
+                        nama_produk=product.nama,
+                        nama_toko=store.nama,
+                        alamat_toko=store.alamat,
+                        lat_toko=store.lat,
+                        lng_toko=store.lng,
+                        tanggal_harga=price.timestamp,
+                        stale=price.stale,
+                    ))
 
         # 4. Grouping entri harga berdasarkan store_id
         # stores_data[store_id] = { "store_info": StoreInfoOutput, "items_map": { pid: { nama, harga } } }
@@ -132,7 +123,9 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
 
             stores_data[sid]["items_map"][pid] = {
                 "nama_produk": row.nama_produk or "Produk Tanpa Nama",
-                "harga_satuan": float(row.harga)
+                "harga_satuan": float(row.harga),
+                "tanggal_harga": row.tanggal_harga,
+                "stale": row.stale,
             }
 
         # 5. Evaluasi Toko (Full Match & Cost Calculation)
@@ -159,7 +152,9 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
                         nama_produk=pinfo["nama_produk"],
                         qty=q,
                         harga_satuan=unit_p,
-                        subtotal=subtotal
+                        subtotal=subtotal,
+                        tanggal_harga=pinfo["tanggal_harga"],
+                        stale=pinfo["stale"],
                     ))
 
                 all_full_match_stores.append({
@@ -259,14 +254,15 @@ def recommend_budget_shopping(payload: BudgetRecommendRequest, db: Session = Dep
         for pid in requested_pids:
             product_rows = [row for row in query_results if str(row.product_id) == pid]
             if product_rows:
-                cheapest_row = min(product_rows, key=lambda x: x.harga)
+                cheapest_row = min(product_rows, key=lambda x: (x.stale, x.harga, x.store_id))
                 prod_name = cheapest_row.nama_produk or "Produk Tanpa Nama"
                 availabilities.append(ProductAvailability(
                     product_id=pid,
                     nama_produk=prod_name,
                     is_available=True,
                     harga_terendah=float(cheapest_row.harga),
-                    toko_terendah=cheapest_row.nama_toko or "Toko"
+                    toko_terendah=cheapest_row.nama_toko or "Toko",
+                    stale=cheapest_row.stale,
                 ))
             else:
                 prod_db = db.query(Product).filter(Product.id == pid).first()

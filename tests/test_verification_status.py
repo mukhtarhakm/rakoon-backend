@@ -189,11 +189,12 @@ class TestVerificationStatus(unittest.TestCase):
         self.assertIsNone(store_b_comparison["harga_terbaru"])
         self.assertEqual(store_b_comparison["pesan"], "Belum ada data untuk produk ini di toko ini")
 
-        # Store A and Store C must have prices
+        # Store A (verified) punya harga; Store C (hanya pending) belum punya harga terkini
         store_a_comparison = next((item for item in comparison if item["nama_toko"] == "Indomaret Sudirman"), None)
         store_c_comparison = next((item for item in comparison if item["nama_toko"] == "Superindo"), None)
         self.assertEqual(store_a_comparison["harga_terbaru"], 10000)
-        self.assertEqual(store_c_comparison["harga_terbaru"], 11000)
+        self.assertIsNone(store_c_comparison["harga_terbaru"])
+        self.assertEqual(store_c_comparison["pesan"], "Belum ada data untuk produk ini di toko ini")
 
         # "Termurah" should be Indomaret Sudirman (10000), not Alfamart Gatsu (5000 is rejected)
         self.assertEqual(comparison[0]["nama_toko"], "Indomaret Sudirman")

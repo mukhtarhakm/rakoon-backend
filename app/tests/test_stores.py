@@ -174,7 +174,7 @@ class TestStores(unittest.TestCase):
             store_id="a5b07384-d113-4956-b51c-43f11075d654",
             harga=15000,
             sumber_user_id="b5b07384-d113-4956-b51c-43f11075d654",
-            status_verifikasi="pending"
+            status_verifikasi="verified"  # harga terkini hanya menghitung entri verified (pending tidak)
         )
         db.add(price_entry)
         db.commit()

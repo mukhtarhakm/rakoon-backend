@@ -10,6 +10,7 @@ from app.models.db_models import PriceEntry, Product
 from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin_user
 from app.services import price_history_service
+from app.services.current_price import get_current_prices
 from app.services.price_history_service import DateRange
 from app.routers.stores import get_nearby_stores
 from app.services.errors import safe_error
@@ -297,49 +298,9 @@ def get_price_comparison(
         stores_response = get_nearby_stores(lat=lat, lng=lng, radius_km=radius_km, db=db)
         nearby_stores = stores_response.stores
 
-        # 4. Batch-fetch latest verified price entry per store (single SQL query, no N+1)
-        #    Strategy: subquery selects MAX(timestamp) per store_id for this product,
-        #    then we join back to get the full PriceEntry row.
-        store_ids = [store.store_id for store in nearby_stores]
-
-        latest_prices: dict[str, "PriceEntry"] = {}
-        if store_ids:
-            from sqlalchemy import func, and_
-            from sqlalchemy.orm import aliased
-
-            # Subquery: for each store, find the latest non-rejected timestamp
-            sub = (
-                db.query(
-                    PriceEntry.store_id.label("store_id"),
-                    func.max(PriceEntry.timestamp).label("max_ts"),
-                )
-                .filter(
-                    PriceEntry.product_id == prod_id_parsed,
-                    PriceEntry.store_id.in_(store_ids),
-                    PriceEntry.status_verifikasi != VerificationStatus.REJECTED,
-                )
-                .group_by(PriceEntry.store_id)
-                .subquery()
-            )
-
-            # Main query: join PriceEntry to the subquery on (store_id, timestamp)
-            pe_alias = aliased(PriceEntry)
-            rows = (
-                db.query(pe_alias)
-                .join(
-                    sub,
-                    and_(
-                        pe_alias.store_id == sub.c.store_id,
-                        pe_alias.timestamp == sub.c.max_ts,
-                    ),
-                )
-                .filter(pe_alias.product_id == prod_id_parsed)
-                .all()
-            )
-
-            # Build lookup dict: store_id → PriceEntry
-            for row in rows:
-                latest_prices[str(row.store_id)] = row
+        # 4. Harga terkini per toko (aturan bersama: terbaru, verified saja, stale > 90 hari)
+        current = get_current_prices(db, [prod_id_parsed], [store.store_id for store in nearby_stores])
+        latest_prices = {sid: price for (_pid, sid), price in current.items()}
 
         # 5. Build comparison list using O(1) dict lookup per store
         comparison_list = []
@@ -356,8 +317,9 @@ def get_price_comparison(
                         jarak_km=store.jarak_km,
                         harga_terbaru=entry.harga,
                         tanggal_update=entry.timestamp,
-                        status_verifikasi=entry.status_verifikasi,
+                        status_verifikasi=VerificationStatus.VERIFIED.value,
                         pesan=None,
+                        stale=entry.stale,
                     )
                 )
             else:

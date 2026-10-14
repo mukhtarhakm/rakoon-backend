@@ -192,6 +192,7 @@ class PriceCompareItem(BaseModel):
     tanggal_update: Optional[datetime] = Field(None, description="Tanggal update harga terbaru")
     status_verifikasi: Optional[str] = Field(None, description="Status verifikasi harga")
     pesan: Optional[str] = Field(None, description="Pesan status ketersediaan harga")
+    stale: bool = Field(False, description="True bila harga terbaru berumur lebih dari 90 hari")
 
 class PriceCompareResponse(BaseModel):
     product_id: Union[int, str] = Field(..., description="ID dari produk")
@@ -214,6 +215,7 @@ class RecommendedProductItem(BaseModel):
     nama_toko: str = Field(..., description="Nama toko terdekat tempat harga dicatat")
     jarak_km: Optional[float] = Field(None, description="Jarak toko dari lokasi pengguna dalam km")
     updated_at: str = Field(..., description="Waktu update harga (relatif atau ISO)")
+    stale: bool = Field(False, description="True bila harga berumur lebih dari 90 hari")
     foto_url: Optional[str] = Field(None, description="URL foto produk")
 
 
@@ -291,6 +293,8 @@ class BudgetItemResult(BaseModel):
     qty: int = Field(..., description="Jumlah item yang dibeli")
     harga_satuan: float = Field(..., description="Harga satuan produk di toko terpilih")
     subtotal: float = Field(..., description="Subtotal harga (harga_satuan * qty)")
+    tanggal_harga: Optional[datetime] = Field(None, description="Waktu harga satuan dicatat")
+    stale: bool = Field(False, description="True bila harga satuan berumur lebih dari 90 hari")
 
 class StoreInfoOutput(BaseModel):
     store_id: str = Field(..., description="ID dari toko")
@@ -305,6 +309,7 @@ class ProductAvailability(BaseModel):
     is_available: bool = Field(..., description="True jika produk tersedia di setidaknya satu toko")
     harga_terendah: Optional[float] = Field(None, description="Harga terendah produk di toko yang menyediakannya")
     toko_terendah: Optional[str] = Field(None, description="Nama toko yang memiliki harga terendah tersebut")
+    stale: bool = Field(False, description="True bila harga terendah berumur lebih dari 90 hari")
 
 class AlternativeStoreOutput(BaseModel):
     store_info: StoreInfoOutput

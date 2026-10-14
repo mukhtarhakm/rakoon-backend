@@ -10,6 +10,7 @@ from app.models.schemas import ProductCategoryType, ProductPhotoUpdate
 from app.dependencies import get_current_admin_user
 from app.services.storage_upload import upload_image
 from app.services.errors import safe_error
+from app.services.current_price import CurrentPrice, get_current_prices, pick_cheapest
 
 from uuid import UUID
 
@@ -38,7 +39,8 @@ class ProductCatalogItem(BaseModel):
     nama_toko_terendah: Optional[str] = Field(None, description="Nama toko yang menjual harga terendah")
     jumlah_toko: int = Field(0, description="Jumlah toko yang menyediakan produk ini")
     foto_url: Optional[str] = Field(None, description="URL foto produk")
-    updated_at: Optional[str] = Field(None, description="Timestamp ISO entri harga terbaru")
+    updated_at: Optional[str] = Field(None, description="Timestamp ISO harga yang ditampilkan (harga terkini)")
+    stale: bool = Field(False, description="True bila harga yang ditampilkan berumur lebih dari 90 hari")
 
 
 @router.get("/", response_model=List[ProductOut], status_code=status.HTTP_200_OK)
@@ -74,7 +76,7 @@ def get_products_catalog(
     """
     Mengambil katalog produk terstruktur lengkap dengan harga terendah, toko penyedia, dan info ketersediaan.
     """
-    from app.models.db_models import PriceEntry, Store
+    from app.models.db_models import Store
 
     query = db.query(Product)
 
@@ -88,66 +90,35 @@ def get_products_catalog(
     if not products:
         return []
 
-    # Batch fetch all relevant PriceEntry rows in a single query (eliminating N+1)
-    product_ids = [prod.id for prod in products]
-    price_entries = (
-        db.query(PriceEntry)
-        .filter(
-            PriceEntry.product_id.in_(product_ids),
-            PriceEntry.status_verifikasi != "rejected"
-        )
-        .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
-        .all()
-    )
+    # Harga terkini per (produk, toko): terbaru, verified saja, stale > 90 hari (aturan bersama).
+    prices_by_product: dict[str, list[CurrentPrice]] = {}
+    for (pid, _sid), price in get_current_prices(db, [prod.id for prod in products]).items():
+        prices_by_product.setdefault(pid, []).append(price)
+    best_by_product = {pid: pick_cheapest(prices) for pid, prices in prices_by_product.items()}
 
-    pes_by_product: dict[str, list[PriceEntry]] = {}
-    needed_store_ids = set()
-    for pe in price_entries:
-        pid_str = str(pe.product_id)
-        if pid_str not in pes_by_product:
-            pes_by_product[pid_str] = []
-            needed_store_ids.add(pe.store_id)
-        pes_by_product[pid_str].append(pe)
-
-    # Batch fetch cheapest store names in a single query
     store_names: dict[str, str] = {}
+    needed_store_ids = {best.store_id for best in best_by_product.values()}
     if needed_store_ids:
-        stores = db.query(Store).filter(Store.id.in_(needed_store_ids)).all()
-        for s in stores:
+        for s in db.query(Store).filter(Store.id.in_(needed_store_ids)).all():
             store_names[str(s.id)] = s.nama
 
     catalog_items: List[ProductCatalogItem] = []
-
     for prod in products:
-        pes = pes_by_product.get(str(prod.id), [])
-        harga_min = None
-        toko_min = None
-        ts_latest = None
-        store_ids = set()
-
-        if pes:
-            cheapest = pes[0]
-            harga_min = float(cheapest.harga)
-            if cheapest.timestamp:
-                ts_latest = cheapest.timestamp.isoformat()
-
-            toko_min = store_names.get(str(cheapest.store_id))
-
-            for pe in pes:
-                store_ids.add(pe.store_id)
-
+        pid = str(prod.id)
+        best = best_by_product.get(pid)
         catalog_items.append(
             ProductCatalogItem(
-                id=str(prod.id),
+                id=pid,
                 nama=prod.nama,
                 kategori=prod.kategori or "General",
                 ukuran=prod.ukuran,
                 satuan=prod.satuan,
-                harga_terendah=harga_min,
-                nama_toko_terendah=toko_min,
-                jumlah_toko=len(store_ids),
+                harga_terendah=float(best.harga) if best else None,
+                nama_toko_terendah=store_names.get(best.store_id) if best else None,
+                jumlah_toko=len(prices_by_product.get(pid, [])),
                 foto_url=getattr(prod, "foto_url", None),
-                updated_at=ts_latest
+                updated_at=best.timestamp.isoformat() if best else None,
+                stale=best.stale if best else False,
             )
         )
 

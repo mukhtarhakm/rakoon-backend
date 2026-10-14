@@ -15,7 +15,8 @@ from app.models.schemas import (
 )
 from app.database import get_db
 from app.services.errors import safe_error
-from app.models.db_models import Product, PriceEntry, Store
+from app.models.db_models import Product, Store
+from app.services.current_price import CurrentPrice, get_current_prices, pick_cheapest
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("rakoon_backend.recommendation")
@@ -334,77 +335,37 @@ def get_recommended_products(
                 dist = haversine_distance(lat, lng, st.lat, st.lng)
                 store_distance_map[s_id] = dist
 
-        # 2. Query all products and batch-fetch all non-rejected price entries (eliminating N+1)
+        # 2. Produk + harga terkini per (produk, toko): terbaru, verified saja, stale > 90 hari (aturan bersama)
         products = db.query(Product).all()
+        prices_by_product: Dict[str, List[CurrentPrice]] = {}
+        for (pid, _sid), price in get_current_prices(db).items():
+            prices_by_product.setdefault(pid, []).append(price)
+
         candidates = []
-
-        if products:
-            product_ids = [prod.id for prod in products]
-            all_price_entries = (
-                db.query(PriceEntry)
-                .filter(
-                    PriceEntry.product_id.in_(product_ids),
-                    PriceEntry.status_verifikasi != "rejected"
-                )
-                .order_by(PriceEntry.harga.asc(), PriceEntry.timestamp.desc())
-                .all()
-            )
-            pes_by_product: Dict[str, List[PriceEntry]] = {}
-            for pe in all_price_entries:
-                pid_str = str(pe.product_id)
-                if pid_str not in pes_by_product:
-                    pes_by_product[pid_str] = []
-                pes_by_product[pid_str].append(pe)
-        else:
-            pes_by_product = {}
-
         for prod in products:
-            pes = pes_by_product.get(str(prod.id), [])
-            if not pes:
+            prices = prices_by_product.get(str(prod.id), [])
+            if not prices:
                 continue
 
-            best_pe = None
-            best_dist = None
-
             if lat is not None and lng is not None and store_distance_map:
-                # First check price entries within specified radius
                 inside_radius = [
-                    pe for pe in pes
-                    if str(pe.store_id) in store_distance_map and store_distance_map[str(pe.store_id)] <= radius_km
+                    p for p in prices
+                    if p.store_id in store_distance_map and store_distance_map[p.store_id] <= radius_km
                 ]
                 if inside_radius:
-                    best_pe = sorted(inside_radius, key=lambda x: (x.harga, store_distance_map.get(str(x.store_id), 999.0)))[0]
-                    best_dist = store_distance_map.get(str(best_pe.store_id))
+                    best = min(inside_radius, key=lambda p: (p.stale, p.harga, store_distance_map[p.store_id], p.store_id))
                 else:
-                    # If none inside radius, pick cheapest overall among stores with known distance
-                    sorted_pes = sorted(
-                        pes,
-                        key=lambda x: (store_distance_map.get(str(x.store_id), 999.0), x.harga)
-                    )
-                    best_pe = sorted_pes[0]
-                    best_dist = store_distance_map.get(str(best_pe.store_id))
+                    # Tidak ada toko dalam radius: ambil toko terdekat yang punya harga
+                    best = min(prices, key=lambda p: (store_distance_map.get(p.store_id, 999.0), p.stale, p.harga, p.store_id))
             else:
-                best_pe = pes[0]
-                best_dist = store_distance_map.get(str(best_pe.store_id))
+                best = pick_cheapest(prices)
+            best_dist = store_distance_map.get(best.store_id)
 
-            store = store_map.get(str(best_pe.store_id))
-            if not store:
-                store = db.query(Store).filter(Store.id == best_pe.store_id).first()
-
+            store = store_map.get(best.store_id)
             store_name = store.nama if store else "Toko Terdekat"
-
-            # Compute real timestamp in ISO format
-            if best_pe.timestamp:
-                updated_at_str = best_pe.timestamp.isoformat()
-            else:
-                updated_at_str = datetime.now(timezone.utc).isoformat()
-
-            # Read product photo URL
-            foto = getattr(prod, "foto_url", None)
 
             # Round distance to 2 decimal places (e.g. 1.04 or 1.25 km) to preserve accuracy
             exact_dist_km = round(best_dist, 2) if best_dist is not None else None
-
             is_inside = 1 if (best_dist is not None and best_dist <= radius_km) else 0
 
             candidates.append({
@@ -412,21 +373,24 @@ def get_recommended_products(
                     id=str(prod.id),
                     nama=prod.nama,
                     kategori=prod.kategori or "General",
-                    harga=float(best_pe.harga),
+                    harga=float(best.harga),
                     ukuran=prod.ukuran,
                     satuan=prod.satuan,
                     nama_toko=store_name,
                     jarak_km=exact_dist_km,
-                    updated_at=updated_at_str,
-                    foto_url=foto,
+                    updated_at=best.timestamp.isoformat(),
+                    stale=best.stale,
+                    foto_url=getattr(prod, "foto_url", None),
                 ),
                 "inside": is_inside,
-                "harga": float(best_pe.harga),
+                "stale": best.stale,
+                "harga": float(best.harga),
                 "jarak": best_dist if best_dist is not None else 999.0,
+                "id": str(prod.id),
             })
 
-        # Sort candidates prioritizing items inside radius, then lowest price & proximity
-        candidates.sort(key=lambda x: (-x["inside"], x["harga"], x["jarak"]))
+        # Dalam radius dulu, harga segar sebelum stale, lalu termurah dan terdekat (urutan deterministik)
+        candidates.sort(key=lambda x: (-x["inside"], x["stale"], x["harga"], x["jarak"], x["id"]))
         results = [c["item"] for c in candidates]
 
     except Exception as e:
