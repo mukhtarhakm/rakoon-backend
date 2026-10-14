@@ -85,7 +85,7 @@ class TestAdminProducts(unittest.TestCase):
         mock_bucket.upload.return_value = {"Key": "mocked"}
         self.mock_sb.storage.from_.return_value = mock_bucket
 
-        self.mock_sb_patch = patch("app.routers.products.supabase", self.mock_sb)
+        self.mock_sb_patch = patch("app.services.storage_upload.supabase", self.mock_sb)
         self.mock_sb_patch.start()
 
     def tearDown(self):
@@ -196,7 +196,7 @@ class TestAdminProducts(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertTrue(data["foto_url"].startswith("https://") or data["foto_url"].startswith("/static/uploads/"))
+        self.assertTrue(data["foto_url"].startswith("https://"))
         self.assertTrue(data["foto_url"].rstrip("?").endswith(".jpg"))
 
     def test_upload_photo_invalid_type_rejected(self):
@@ -208,6 +208,49 @@ class TestAdminProducts(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 400)
         self.assertIn("Format file tidak valid", res.json()["detail"])
+
+    def _stored_foto_url(self):
+        self.db.expire_all()
+        return self.db.query(Product).filter(Product.id == self.prod_id).first().foto_url
+
+    def test_upload_photo_storage_failure_returns_503_and_keeps_old_photo(self):
+        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        self.mock_sb.storage.from_.return_value.upload.side_effect = Exception("storage down")
+        res = self.client.post(
+            f"/products/{self.prod_id}/upload-photo",
+            files={"file": ("susu.png", io.BytesIO(b"\x89PNG\r\n\x1a\nbody"), "image/png")}
+        )
+        self.assertEqual(res.status_code, 503)
+        self.assertIsNone(self._stored_foto_url())
+
+    def test_upload_photo_with_mock_client_returns_503_not_local_path(self):
+        from app.database import MockSupabaseClient
+        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        with patch("app.services.storage_upload.supabase", MockSupabaseClient()):
+            res = self.client.post(
+                f"/products/{self.prod_id}/upload-photo",
+                files={"file": ("susu.png", io.BytesIO(b"\x89PNG\r\n\x1a\nbody"), "image/png")}
+            )
+        self.assertEqual(res.status_code, 503)
+        self.assertIsNone(self._stored_foto_url())
+
+    def test_upload_photo_fake_png_by_extension_and_content_type_rejected(self):
+        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        res = self.client.post(
+            f"/products/{self.prod_id}/upload-photo",
+            files={"file": ("evil.png", io.BytesIO(b"<html>not an image</html>"), "image/png")}
+        )
+        self.assertEqual(res.status_code, 400)
+        self.mock_sb.storage.from_.return_value.upload.assert_not_called()
+
+    def test_upload_photo_over_5mb_returns_413(self):
+        app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
+        big = b"\x89PNG\r\n\x1a\n" + b"\x00" * (5 * 1024 * 1024)
+        res = self.client.post(
+            f"/products/{self.prod_id}/upload-photo",
+            files={"file": ("big.png", io.BytesIO(big), "image/png")}
+        )
+        self.assertEqual(res.status_code, 413)
 
     def test_catalog_shows_uploaded_photo(self):
         app.dependency_overrides[get_current_user] = lambda: TEST_ADMIN_ID
