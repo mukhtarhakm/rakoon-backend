@@ -117,27 +117,28 @@ def extract_and_parse_json(text: str) -> dict:
 
 class SimpleRateLimiter:
     """
-    Lightweight in-memory sliding window rate limiter per client IP.
+    Lightweight in-memory sliding window rate limiter per key (user_id).
     Membatasi jumlah panggilan per rentang waktu untuk mencegah bot/abuse.
+    Batas: state per proses (hilang saat restart, tidak dibagi antar worker).
     """
     def __init__(self, max_requests: int = 10, window_seconds: int = 60):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests = defaultdict(list)
 
-    def check(self, client_ip: str):
+    def check(self, client_key: str):
         now = time.time()
         # Bersihkan timestamp di luar jendela waktu
-        self.requests[client_ip] = [ts for ts in self.requests[client_ip] if now - ts < self.window_seconds]
-        if len(self.requests[client_ip]) >= self.max_requests:
-            retry_after = int(self.window_seconds - (now - self.requests[client_ip][0]))
-            logger.warning(f"Rate limit exceeded for client IP: {client_ip}")
+        self.requests[client_key] = [ts for ts in self.requests[client_key] if now - ts < self.window_seconds]
+        if len(self.requests[client_key]) >= self.max_requests:
+            retry_after = int(self.window_seconds - (now - self.requests[client_key][0]))
+            logger.warning(f"Rate limit exceeded for user: {client_key}")
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Terlalu banyak permintaan scan foto. Silakan coba lagi dalam {max(1, retry_after)} detik.",
                 headers={"Retry-After": str(max(1, retry_after))}
             )
-        self.requests[client_ip].append(now)
+        self.requests[client_key].append(now)
 
 
 scan_rate_limiter = SimpleRateLimiter(max_requests=10, window_seconds=60)
@@ -146,20 +147,17 @@ MAX_SCAN_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 @router.post("/", response_model=ScanResponse, status_code=status.HTTP_200_OK)
 async def scan_shelf_photo(
-    request: Request,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user)
 ):
     """
     Menerima file foto rak (multipart/form-data) dan memprosesnya melalui
-    AI Vision Pipeline menggunakan model gpt-5.6-luna (OpenAI).
-    Dilindungi dengan rate limiter (maks 10 scan/menit per IP) dan validasi ukuran file (maks 5 MB).
+    AI Vision Pipeline menggunakan model gpt-5.6-luna (OpenAI). Wajib login.
+    Dilindungi dengan rate limiter per pengguna (maks 10 scan/menit; IP dan X-Forwarded-For
+    tidak dipakai karena bisa dipalsukan) dan validasi ukuran file (maks 5 MB).
     """
-    # 0. Rate limiting check per client IP
-    client_ip = request.client.host if request.client else "unknown"
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        client_ip = forwarded_for.split(",")[0].strip()
-    scan_rate_limiter.check(client_ip)
+    # 0. Rate limiting per user_id (dari token terverifikasi)
+    scan_rate_limiter.check(user_id)
 
     # 1. Validasi file upload
     if not file.filename:
@@ -188,7 +186,7 @@ async def scan_shelf_photo(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail="Ukuran file foto terlalu besar (maksimum 5 MB)."
             )
-        logger.info(f"Received file '{file.filename}' ({len(contents)} bytes) from IP {client_ip} for scanning.")
+        logger.info(f"Received file '{file.filename}' ({len(contents)} bytes) from user {user_id} for scanning.")
     except HTTPException:
         raise
     except Exception as e:

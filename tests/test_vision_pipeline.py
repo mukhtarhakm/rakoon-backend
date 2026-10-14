@@ -5,7 +5,8 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.models.schemas import ScanResultItem, ProductCategory
+from app.dependencies import get_current_user
+from app.models.schemas import ScanResultItem, ProductCategory, ScanResponse
 from app.services.vision_service import (
     process_shelf_image,
     check_needs_escalation,
@@ -328,16 +329,29 @@ class TestVisionHelpers(unittest.TestCase):
         self.assertEqual(parsed3["detected"][0]["nama_produk"], "A")
 
 
+USER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+USER_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
 class TestScanEndpoint(unittest.TestCase):
 
     def setUp(self):
         from app.routers.scan import scan_rate_limiter
         scan_rate_limiter.requests.clear()
+        self.current_user = USER_A
+        app.dependency_overrides[get_current_user] = lambda: self.current_user
         self.client = TestClient(app)
+        self.bad_file = {"file": ("test.txt", b"invalid", "text/plain")}
 
     def tearDown(self):
         from app.routers.scan import scan_rate_limiter
         scan_rate_limiter.requests.clear()
+        app.dependency_overrides.pop(get_current_user, None)
+
+    def _post_bad(self, user=None, headers=None):
+        if user:
+            self.current_user = user
+        return self.client.post("/scan/", files=self.bad_file, headers=headers or {})
 
     def test_scan_invalid_extension(self):
         response = self.client.post(
@@ -364,24 +378,51 @@ class TestScanEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         self.assertIn("terlalu besar", response.json()["detail"])
 
-    def test_scan_rate_limiting(self):
-        test_ip = "192.168.1.100"
-        headers = {"X-Forwarded-For": test_ip}
-        for _ in range(10):
-            res = self.client.post(
-                "/scan/",
-                files={"file": ("test.txt", b"invalid", "text/plain")},
-                headers=headers
-            )
-            self.assertEqual(res.status_code, 400)
+    def test_scan_requires_login_and_never_calls_vision_without_token(self):
+        app.dependency_overrides.pop(get_current_user, None)
+        with patch("app.routers.scan.process_shelf_image", new_callable=AsyncMock) as mock_vision:
+            for headers in ({}, {"Authorization": "Bearer not-a-real-token"}):
+                response = self.client.post(
+                    "/scan/",
+                    files={"file": ("shelf.jpg", b"\xff\xd8\xff\xe0fake", "image/jpeg")},
+                    headers=headers,
+                )
+                self.assertEqual(response.status_code, 401)
+            mock_vision.assert_not_called()
 
-        response = self.client.post(
-            "/scan/",
-            files={"file": ("test.txt", b"invalid", "text/plain")},
-            headers=headers
-        )
-        self.assertEqual(response.status_code, 429)
-        self.assertIn("Terlalu banyak permintaan scan", response.json()["detail"])
+    def test_scan_success_for_logged_in_user_calls_vision_once(self):
+        with patch("app.routers.scan.process_shelf_image", new_callable=AsyncMock) as mock_vision:
+            mock_vision.return_value = ScanResponse(detected=[], message="ok", model_used="mock")
+            response = self.client.post(
+                "/scan/",
+                files={"file": ("shelf.jpg", b"\xff\xd8\xff\xe0fake", "image/jpeg")},
+            )
+        self.assertEqual(response.status_code, 200)
+        mock_vision.assert_awaited_once()
+
+    def test_scan_rate_limit_is_per_user_and_returns_429(self):
+        for _ in range(10):
+            self.assertEqual(self._post_bad(USER_A).status_code, 400)
+
+        blocked = self._post_bad(USER_A)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertIn("Terlalu banyak permintaan scan", blocked.json()["detail"])
+        self.assertIn("Retry-After", blocked.headers)
+
+    def test_one_user_exhausting_quota_does_not_block_another_user(self):
+        for _ in range(11):
+            self._post_bad(USER_A)
+        self.assertEqual(self._post_bad(USER_A).status_code, 429)
+        self.assertEqual(self._post_bad(USER_B).status_code, 400)  # B tetap punya jatah penuh
+
+    def test_x_forwarded_for_cannot_bypass_or_share_the_limit(self):
+        for i in range(10):
+            res = self._post_bad(USER_A, headers={"X-Forwarded-For": f"10.0.0.{i}"})
+            self.assertEqual(res.status_code, 400)
+        # IP berganti-ganti tidak memberi jatah baru
+        self.assertEqual(self._post_bad(USER_A, headers={"X-Forwarded-For": "10.9.9.9"}).status_code, 429)
+        # IP yang sama dengan user lain tidak berbagi jatah
+        self.assertEqual(self._post_bad(USER_B, headers={"X-Forwarded-For": "10.0.0.1"}).status_code, 400)
 
 
 if __name__ == "__main__":
