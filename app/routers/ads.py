@@ -325,22 +325,47 @@ def _reconcile_transaction_with_xendit(
     Safely reconciles a pending transaction with Xendit API.
     Acts as a fallback when webhooks are delayed, dropped, or unreachable (e.g. local environment).
     Never marks paid unless Xendit API explicitly confirms status as PAID or SETTLED.
+    Panggilan HTTP dilakukan tanpa kunci baris; baru setelah itu transaksi lalu kampanye dikunci
+    (urutan yang sama dengan webhook) dan status divalidasi ulang sebelum menulis.
     """
     if not tx or tx.status != "PENDING":
         return False
 
+    tx_id, campaign_id = tx.id, campaign.id
+    xendit_invoice_id, external_id = tx.xendit_invoice_id, tx.external_id
+
     try:
         x_inv = None
-        if tx.xendit_invoice_id:
-            x_inv = xendit_service.get_invoice_by_id(tx.xendit_invoice_id)
-        if not x_inv and tx.external_id:
-            x_inv = xendit_service.get_invoice_by_external_id(tx.external_id)
+        if xendit_invoice_id:
+            x_inv = xendit_service.get_invoice_by_id(xendit_invoice_id)
+        if not x_inv and external_id:
+            x_inv = xendit_service.get_invoice_by_external_id(external_id)
 
         if not x_inv or not isinstance(x_inv, dict):
             return False
 
         x_status = (x_inv.get("status") or "").upper()
+        if x_status not in ("PAID", "SETTLED", "EXPIRED", "FAILED"):
+            return False
+
         now = datetime.now(timezone.utc)
+        tx = (
+            db.query(PaymentTransaction)
+            .filter(PaymentTransaction.id == tx_id)
+            .populate_existing()
+            .with_for_update()
+            .first()
+        )
+        if not tx or tx.status != "PENDING":
+            db.rollback()
+            return False
+        campaign = (
+            db.query(AdCampaign)
+            .filter(AdCampaign.id == campaign_id)
+            .populate_existing()
+            .with_for_update()
+            .first()
+        )
 
         if x_status in ("PAID", "SETTLED"):
             raw_amount = x_inv.get("paid_amount") if x_inv.get("paid_amount") is not None else x_inv.get("amount")
@@ -352,39 +377,35 @@ def _reconcile_transaction_with_xendit(
                 or (x_currency and str(x_currency).upper() != tx.currency.upper())
             ):
                 logger.warning(f"Reconcile PAID ignored for {tx.external_id}: amount/currency missing or mismatched")
+                db.rollback()
                 return False
-            if not _owner_is_verified(db, campaign):
+            if not campaign or not _owner_is_verified(db, campaign):
                 logger.warning(f"Reconcile PAID ignored for {tx.external_id}: store owner not verified")
+                db.rollback()
                 return False
-            if tx.status != "PAID":
-                tx.status = "PAID"
-                tx.paid_at = _parse_iso(x_inv.get("paid_at")) or now
-                tx.updated_at = now
-                if x_inv.get("id"):
-                    tx.xendit_invoice_id = x_inv["id"]
 
-                if campaign.payment_status != "paid":
-                    campaign.payment_status = "paid"
-                    campaign.status = "active"
-                    campaign.payment_ref = x_inv.get("id") or tx.external_id
-                    campaign.start_at = now
-                    campaign.expires_at = now + timedelta(days=campaign.duration_days)
+            tx.status = "PAID"
+            tx.paid_at = _parse_iso(x_inv.get("paid_at")) or now
+            tx.updated_at = now
+            if x_inv.get("id"):
+                tx.xendit_invoice_id = x_inv["id"]
 
-                db.commit()
-                logger.info(f"Transaction {tx.external_id} for campaign {campaign.id} reconciled as PAID via Xendit API")
-                return True
-        elif x_status == "EXPIRED":
-            if tx.status != "PAID":
-                tx.status = "EXPIRED"
-                tx.updated_at = now
-                db.commit()
-        elif x_status == "FAILED":
-            if tx.status != "PAID":
-                tx.status = "FAILED"
-                tx.updated_at = now
-                db.commit()
+            if campaign.payment_status != "paid":
+                campaign.payment_status = "paid"
+                campaign.status = "active"
+                campaign.payment_ref = x_inv.get("id") or tx.external_id
+                campaign.start_at = now
+                campaign.expires_at = now + timedelta(days=campaign.duration_days)
+
+            db.commit()
+            logger.info(f"Transaction {tx.external_id} for campaign {campaign.id} reconciled as PAID via Xendit API")
+            return True
+
+        tx.status = "EXPIRED" if x_status == "EXPIRED" else "FAILED"
+        tx.updated_at = now
+        db.commit()
     except Exception as e:
-        logger.warning(f"Error during Xendit payment reconciliation for {tx.external_id}: {e}")
+        logger.warning(f"Error during Xendit payment reconciliation for {external_id}: {e}")
         db.rollback()
 
     return False
@@ -1513,7 +1534,7 @@ def get_campaign_detail(
     """
     Mengambil detail satu kampanye iklan. Hanya dapat diakses oleh pemilik toko yang memiliki kampanye tersebut.
     """
-    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).with_for_update().first()
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
     if not campaign:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1572,6 +1593,10 @@ def _find_reusable_pending_tx(db: Session, campaign_id, now: datetime) -> Option
     return next((tx for tx in candidates if _ensure_utc(tx.created_at) + INVOICE_LIFETIME > now), None)
 
 
+# Reservasi checkout yang belum punya invoice dianggap macet setelah selang ini (proses mati di tengah jalan).
+CHECKOUT_RESERVATION_GRACE = timedelta(seconds=30)
+
+
 @router.post("/campaigns/{campaign_id}/pay", response_model=InitiatePaymentResponse, status_code=status.HTTP_200_OK)
 def initiate_campaign_payment(
     campaign_id: str,
@@ -1581,8 +1606,10 @@ def initiate_campaign_payment(
     """
     Memulai checkout pembayaran kampanye via payment gateway resmi Xendit Sandbox.
     Membuat invoice Xendit dan mengembalikan URL checkout resmi.
+    Alur: (1) kunci transaksi lalu kampanye, putuskan pakai ulang atau reservasi baris transaksi, commit;
+    (2) panggil Xendit TANPA memegang kunci; (3) simpan invoice ke baris reservasi.
     """
-    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).with_for_update().first()
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
     if not campaign:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1611,19 +1638,6 @@ def initiate_campaign_payment(
             detail="Hanya pemilik toko terverifikasi yang dapat membayar kampanye iklan."
         )
 
-    if campaign.payment_status == "paid" or campaign.status == "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Kampanye iklan ini sudah lunas atau aktif."
-        )
-
-    now = datetime.now(timezone.utc)
-    if _ensure_utc(campaign.expires_at) < now and campaign.status == "expired":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Kampanye iklan ini sudah kedaluwarsa."
-        )
-
     try:
         config = xendit_service.get_xendit_config()
     except xendit_service.XenditConfigError as e:
@@ -1632,66 +1646,99 @@ def initiate_campaign_payment(
             detail=f"Payment gateway Xendit belum dikonfigurasi: {e}"
         )
 
-    # Idempotensi: invoice PENDING yang masih berlaku dipakai ulang; EXPIRED/FAILED/kedaluwarsa tidak.
-    existing_tx = _find_reusable_pending_tx(db, campaign.id, now)
-    if existing_tx:
-        return InitiatePaymentResponse(
-            campaign_id=str(campaign.id),
-            external_id=existing_tx.external_id,
-            xendit_invoice_id=existing_tx.xendit_invoice_id,
-            amount=int(existing_tx.amount),
-            currency=existing_tx.currency,
-            status=existing_tx.status,
-            invoice_url=existing_tx.invoice_url,
-            expiry_date=None,
+    now = datetime.now(timezone.utc)
+
+    # --- Fase 1: kunci transaksi -> kampanye (urutan sama dengan webhook), putuskan, commit ---
+    txs = (
+        db.query(PaymentTransaction)
+        .filter(PaymentTransaction.campaign_id == campaign.id)
+        .order_by(PaymentTransaction.created_at.desc())
+        .populate_existing()
+        .with_for_update()
+        .all()
+    )
+    campaign = (
+        db.query(AdCampaign)
+        .filter(AdCampaign.id == campaign_id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+
+    if campaign.payment_status == "paid" or campaign.status == "active":
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Kampanye iklan ini sudah lunas atau aktif."
         )
 
-    # external_id unik per percobaan: payment_ref dipakai untuk percobaan pertama, sisanya diganti baru.
-    external_id = campaign.payment_ref
-    if not external_id or db.query(PaymentTransaction.id).filter(PaymentTransaction.external_id == external_id).first():
-        external_id = f"INV-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-        campaign.payment_ref = external_id
-        db.commit()
+    if _ensure_utc(campaign.expires_at) < now and campaign.status == "expired":
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Kampanye iklan ini sudah kedaluwarsa."
+        )
 
-    description = f"Kampanye Iklan Rakoon: {campaign.title} ({campaign.duration_days} Hari)"
-    try:
-        xendit_resp = xendit_service.create_invoice(
+    # Idempotensi: invoice PENDING yang masih berlaku dipakai ulang; EXPIRED/FAILED/kedaluwarsa tidak.
+    for existing_tx in txs:
+        if (
+            existing_tx.status == "PENDING"
+            and existing_tx.invoice_url
+            and _ensure_utc(existing_tx.created_at) + INVOICE_LIFETIME > now
+        ):
+            response = InitiatePaymentResponse(
+                campaign_id=str(campaign.id),
+                external_id=existing_tx.external_id,
+                xendit_invoice_id=existing_tx.xendit_invoice_id,
+                amount=int(existing_tx.amount),
+                currency=existing_tx.currency,
+                status=existing_tx.status,
+                invoice_url=existing_tx.invoice_url,
+                expiry_date=None,
+            )
+            db.rollback()
+            return response
+
+    reservation = next((tx for tx in txs if tx.status == "PENDING" and not tx.invoice_url), None)
+    if reservation:
+        if now - _ensure_utc(reservation.created_at) < CHECKOUT_RESERVATION_GRACE:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Transaksi sedang diproses oleh permintaan lain. Silakan periksa status pembayaran."
+            )
+        external_id = reservation.external_id  # lanjutkan percobaan yang macet; Xendit idempoten per external_id
+    else:
+        # external_id unik per percobaan: payment_ref dipakai untuk percobaan pertama, sisanya diganti baru.
+        external_id = campaign.payment_ref
+        if not external_id or any(t.external_id == external_id for t in txs):
+            external_id = f"INV-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        campaign.payment_ref = external_id
+        db.add(PaymentTransaction(
+            campaign_id=campaign.id,
+            owner_user_id=campaign.owner_user_id,
+            provider="xendit",
+            environment=config["environment"],
             external_id=external_id,
             amount=campaign.price_paid,
-            description=description,
-        )
-    except xendit_service.XenditAPIError as e:
-        logger.error(f"Gagal memanggil Xendit invoice API: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gagal menghubungi gateway pembayaran Xendit. Silakan coba kembali."
-        )
+            currency="IDR",
+            status="PENDING",
+            invoice_url=None,
+            created_at=now,
+            updated_at=now,
+        ))
 
-    tx = PaymentTransaction(
-        campaign_id=campaign.id,
-        owner_user_id=campaign.owner_user_id,
-        provider="xendit",
-        environment=config["environment"],
-        external_id=external_id,
-        xendit_invoice_id=xendit_resp.get("id"),
-        amount=campaign.price_paid,
-        currency="IDR",
-        status="PENDING",
-        invoice_url=xendit_resp.get("invoice_url"),
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(tx)
+    amount = campaign.price_paid
+    description = f"Kampanye Iklan Rakoon: {campaign.title} ({campaign.duration_days} Hari)"
     try:
         db.commit()
-        db.refresh(tx)
     except IntegrityError:
         db.rollback()
         logger.info(f"Concurrent checkout race condition detected for {external_id}, reconciling...")
-        existing_tx = _find_reusable_pending_tx(db, campaign.id, now)
+        existing_tx = _find_reusable_pending_tx(db, campaign_id, now)
         if existing_tx:
             return InitiatePaymentResponse(
-                campaign_id=str(campaign.id),
+                campaign_id=campaign_id,
                 external_id=existing_tx.external_id,
                 xendit_invoice_id=existing_tx.xendit_invoice_id,
                 amount=int(existing_tx.amount),
@@ -1712,14 +1759,49 @@ def initiate_campaign_payment(
             detail="Database error saving payment transaction"
         )
 
+    # --- Fase 2: panggil Xendit tanpa kunci baris ---
+    try:
+        xendit_resp = xendit_service.create_invoice(
+            external_id=external_id,
+            amount=amount,
+            description=description,
+        )
+    except xendit_service.XenditAPIError as e:
+        logger.error(f"Gagal memanggil Xendit invoice API: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gagal menghubungi gateway pembayaran Xendit. Silakan coba kembali."
+        )
+
+    # --- Fase 3: simpan invoice ke baris reservasi ---
+    try:
+        tx = (
+            db.query(PaymentTransaction)
+            .filter(PaymentTransaction.external_id == external_id)
+            .populate_existing()
+            .with_for_update()
+            .first()
+        )
+        tx.xendit_invoice_id = xendit_resp.get("id")
+        tx.invoice_url = xendit_resp.get("invoice_url")
+        tx.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Database error saving payment transaction: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error saving payment transaction"
+        )
+
     return InitiatePaymentResponse(
-        campaign_id=str(campaign.id),
-        external_id=tx.external_id,
-        xendit_invoice_id=tx.xendit_invoice_id,
-        amount=int(tx.amount),
-        currency=tx.currency,
-        status=tx.status,
-        invoice_url=tx.invoice_url,
+        campaign_id=campaign_id,
+        external_id=external_id,
+        xendit_invoice_id=xendit_resp.get("id"),
+        amount=int(amount),
+        currency="IDR",
+        status="PENDING",
+        invoice_url=xendit_resp.get("invoice_url"),
         expiry_date=xendit_resp.get("expiry_date"),
     )
 
@@ -1898,7 +1980,7 @@ def get_campaign_payment_status(
     Mengambil status pembayaran dan transaksi kampanye iklan terkini.
     Hanya dapat diakses oleh pemilik kampanye yang sah.
     """
-    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).with_for_update().first()
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
     if not campaign:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

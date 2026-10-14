@@ -1172,6 +1172,153 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertFalse(self._reconcile(cid, {"id": inv_id, "external_id": ext_id, "status": "PAID", "paid_amount": 15000}))
         self._assert_campaign_untouched(cid)
 
+    # ---- P4-04: urutan kunci baris dan kunci tidak dipegang saat HTTP ke Xendit ----
+    # Batas: SQLite tidak punya SELECT ... FOR UPDATE dan tidak bisa mereproduksi deadlock Postgres.
+    # Yang diuji di sini adalah urutan akuisisi kunci (lewat spy Query.with_for_update) dan bahwa
+    # sesi tidak sedang berada dalam transaksi saat panggilan HTTP dibuat. Deadlock nyata perlu Postgres.
+
+    def _lock_spy(self):
+        from sqlalchemy.orm import Query
+        events = []
+        original = Query.with_for_update
+
+        def spy(query_self, *args, **kwargs):
+            events.append(("lock", query_self.column_descriptions[0]["entity"].__name__))
+            return original(query_self, *args, **kwargs)
+
+        return events, patch.object(Query, "with_for_update", spy)
+
+    def _capture_sessions(self):
+        sessions = []
+
+        def capture_get_db():
+            db = TestingSessionLocal()
+            sessions.append(db)
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = capture_get_db
+        return sessions
+
+    def _assert_tx_locked_before_campaign(self, events):
+        names = [name for kind, name in events if kind == "lock"]
+        self.assertIn("PaymentTransaction", names)
+        if "AdCampaign" in names:
+            self.assertLess(names.index("PaymentTransaction"), names.index("AdCampaign"))
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_46_pay_locks_transaction_before_campaign_and_releases_locks_before_http(self, mock_create_inv):
+        sessions = self._capture_sessions()
+        events, spy = self._lock_spy()
+
+        def fake_http(**kwargs):
+            events.append(("http", sessions[-1].in_transaction()))
+            return self._fake_invoice(**kwargs)
+
+        mock_create_inv.side_effect = fake_http
+        cid = self._create_pending_campaign()["id"]
+        with spy:
+            res = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(res.status_code, 200)
+
+        http_idx = events.index(next(e for e in events if e[0] == "http"))
+        self.assertFalse(events[http_idx][1], "sesi masih dalam transaksi (kunci baris dipegang) saat HTTP ke Xendit")
+        self._assert_tx_locked_before_campaign(events[:http_idx])
+        self.assertTrue(any(e[0] == "lock" for e in events[:http_idx]))
+
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_47_reconcile_does_no_locking_before_http_and_locks_transaction_first(self, mock_create_inv, mock_get_by_id):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        events, spy = self._lock_spy()
+
+        def fake_http(_invoice_id):
+            events.append(("http", None))
+            return {"id": inv_id, "external_id": ext_id, "status": "PAID", "paid_amount": 15000}
+
+        mock_get_by_id.side_effect = fake_http
+        from app.routers.ads import _reconcile_transaction_with_xendit
+        self.db.expire_all()
+        tx = self._txs(cid)[0]
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        with spy:
+            self.assertTrue(_reconcile_transaction_with_xendit(tx, campaign, self.db))
+
+        http_idx = events.index(("http", None))
+        self.assertEqual([e for e in events[:http_idx] if e[0] == "lock"], [])
+        self._assert_tx_locked_before_campaign(events[http_idx:])
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_48_webhook_locks_transaction_before_campaign(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        events, spy = self._lock_spy()
+        with spy:
+            res = self._webhook(self._paid_payload(ext_id, inv_id))
+        self.assertEqual(res.json()["status"], "success")
+        self._assert_tx_locked_before_campaign(events)
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_49_payment_status_and_campaign_detail_take_no_row_locks(self, mock_create_inv):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        events, spy = self._lock_spy()
+        with spy:
+            self.assertEqual(self.client.get(f"/ads/campaigns/{cid}/payment-status").status_code, 200)
+            self.assertEqual(self.client.get(f"/ads/campaigns/{cid}").status_code, 200)
+        self.assertEqual(events, [])
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_50_recent_unfinished_checkout_returns_409_and_does_not_call_xendit(self, mock_create_inv):
+        cid = self._create_pending_campaign()["id"]
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        self.db.add(PaymentTransaction(
+            campaign_id=cid, owner_user_id=TEST_USER_ID, provider="xendit", environment="sandbox",
+            external_id=campaign.payment_ref, amount=15000, currency="IDR", status="PENDING",
+            invoice_url=None, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        ))
+        self.db.commit()
+
+        res = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(res.status_code, 409)
+        mock_create_inv.assert_not_called()
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_51_stale_unfinished_checkout_is_retried_with_same_external_id(self, mock_create_inv):
+        mock_create_inv.side_effect = self._fake_invoice
+        cid = self._create_pending_campaign()["id"]
+        campaign = self.db.query(AdCampaign).filter(AdCampaign.id == cid).first()
+        ext_id = campaign.payment_ref
+        old = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self.db.add(PaymentTransaction(
+            campaign_id=cid, owner_user_id=TEST_USER_ID, provider="xendit", environment="sandbox",
+            external_id=ext_id, amount=15000, currency="IDR", status="PENDING",
+            invoice_url=None, created_at=old, updated_at=old,
+        ))
+        self.db.commit()
+
+        res = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["external_id"], ext_id)
+        self.assertEqual(mock_create_inv.call_args[1]["external_id"], ext_id)
+        txs = self._txs(cid)
+        self.assertEqual(len(txs), 1)
+        self.assertEqual(txs[0].invoice_url, f"https://checkout.xendit.co/{ext_id}")
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_52_xendit_failure_keeps_reservation_so_retry_reuses_external_id(self, mock_create_inv):
+        cid = self._create_pending_campaign()["id"]
+        mock_create_inv.side_effect = XenditAPIError("timeout")
+        self.assertEqual(self.client.post(f"/ads/campaigns/{cid}/pay").status_code, 502)
+        first_ext = self._txs(cid)[0].external_id
+        self._set_first_tx(cid, created_at=datetime.now(timezone.utc) - timedelta(minutes=5))
+
+        mock_create_inv.side_effect = self._fake_invoice
+        res = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["external_id"], first_ext)
+        self.assertEqual(len(self._txs(cid)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
