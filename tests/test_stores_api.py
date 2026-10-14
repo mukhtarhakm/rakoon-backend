@@ -124,11 +124,11 @@ class TestStoresEndpoint(unittest.TestCase):
         stores = data["stores"]
         self.assertEqual(len(stores), 2)
 
-        # store1 has 2 valid products (1 rejected is excluded)
+        # store1: hanya 1 produk berharga verified (pending dan rejected tidak dihitung)
         s1 = next((s for s in stores if s["store_id"] == self.store1.id), None)
         self.assertIsNotNone(s1)
         self.assertEqual(s1["nama"], "Super Indo Kaliurang")
-        self.assertEqual(s1["total_products"], 2)
+        self.assertEqual(s1["total_products"], 1)
 
         # store2 has 0 recorded products
         s2 = next((s for s in stores if s["store_id"] == self.store2.id), None)
@@ -141,11 +141,11 @@ class TestStoresEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
         products = response.json()
-        # Only non-rejected products should be returned (prod1 and prod2)
-        self.assertEqual(len(products), 2)
+        # Hanya produk dengan harga terkini verified (prod1); pending (prod2) dan rejected tidak tampil
+        self.assertEqual(len(products), 1)
         prod_names = [p["nama"] for p in products]
         self.assertIn("Minyak Goreng 2L", prod_names)
-        self.assertIn("Beras 5kg", prod_names)
+        self.assertNotIn("Beras 5kg", prod_names)
         self.assertNotIn("Gula Pasir 1kg", prod_names)
 
 

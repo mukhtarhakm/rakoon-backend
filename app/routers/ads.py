@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field
 
@@ -457,6 +457,7 @@ def get_home_banners(
     # Ambil kampanye yang berstatus active
     all_active = (
         db.query(AdCampaign)
+        .options(selectinload(AdCampaign.transactions))  # satu query untuk semua transaksi (tanpa N+1)
         .filter(
             AdCampaign.status == "active"
         )

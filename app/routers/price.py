@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Union, Optional
 from datetime import datetime
-from app.models.schemas import PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem, VerificationStatus
+from app.models.schemas import MAX_PAGE_SIZE, PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem, VerificationStatus
 from app.models.db_models import PriceEntry, Product
 from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin_user
@@ -178,6 +178,8 @@ def get_price_history_v1(
     range: Optional[DateRange] = Query(DateRange.ALL, description="Filter rentang tanggal ('1m', '3m', '6m', 'all')"),
     start_date: Optional[datetime] = Query(None, description="Batas awal tanggal (opsional, ISO 8601 format)"),
     end_date: Optional[datetime] = Query(None, description="Batas akhir tanggal (opsional, ISO 8601 format)"),
+    limit: int = Query(MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Jumlah entri per halaman (maks 100); offset 0 = entri terbaru"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah entri terbaru"),
     db: Session = Depends(get_db),
 ):
     """
@@ -197,6 +199,8 @@ def get_price_history_v1(
             range_enum=range,
             start_date=start_date,
             end_date=end_date,
+            limit=limit,
+            offset=offset,
         )
     except ValueError as ve:
         raise HTTPException(
@@ -217,6 +221,8 @@ def get_price_history_v1(
 def get_price_history(
     product_id: str,
     store_id: Optional[str] = Query(None, description="Filter berdasarkan ID toko (opsional)"),
+    limit: int = Query(MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Jumlah entri per halaman (maks 100)"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah entri (terbaru lebih dulu)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -241,7 +247,7 @@ def get_price_history(
             query = query.filter(PriceEntry.store_id == store_id)
             
         # Urutkan berdasarkan timestamp descending (terbaru dahulu)
-        records = query.order_by(PriceEntry.timestamp.desc()).all()
+        records = query.order_by(PriceEntry.timestamp.desc(), PriceEntry.id.desc()).offset(offset).limit(limit).all()
         
         # Jika data kosong, kembalikan pesan "Belum ada data historis" dengan status 200 OK
         if not records:

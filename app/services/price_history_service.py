@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import List, Optional
 
+from types import SimpleNamespace
+
 from sqlalchemy.orm import Session
 
 from app.models.db_models import PriceEntry, Product, Store
@@ -131,6 +133,8 @@ def get_price_history(
     range_enum: Optional[DateRange] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    limit: int = 100,
+    offset: int = 0,
 ) -> PriceHistoryResponse:
     """
     Ambil riwayat harga untuk satu produk dari tabel `price_entries`.
@@ -187,8 +191,12 @@ def get_price_history(
     if resolved_end:
         query = query.filter(PriceEntry.timestamp <= resolved_end)
 
-    # 5. Urutkan ascending (timestamp lama → baru) agar grafik tren konsisten
-    records: List[PriceEntry] = query.order_by(PriceEntry.timestamp.asc()).all()
+    # 5. Tren dihitung dari SELURUH entri hasil filter (kolom ringan saja, bukan objek ORM);
+    #    `items` berhalaman: offset 0 = `limit` entri TERBARU, ditampilkan urut naik (lama -> baru).
+    total = query.count()
+    trend_rows = query.with_entities(PriceEntry.timestamp, PriceEntry.store_id, PriceEntry.harga).all()
+    page = query.order_by(PriceEntry.timestamp.desc(), PriceEntry.id.desc()).offset(offset).limit(limit).all()
+    records: List[PriceEntry] = list(reversed(page))
 
     # 5b. Ambil nama toko dari database untuk masing-masing store_id
     store_ids = {r.store_id for r in records}
@@ -209,13 +217,15 @@ def get_price_history(
         for r in records
     ]
 
-    # 7. Hitung data tren harga untuk grafik (Task B3)
-    trend = calculate_price_trend(items)
+    # 7. Hitung data tren harga untuk grafik (Task B3) dari seluruh entri, bukan hanya satu halaman
+    trend = calculate_price_trend([
+        SimpleNamespace(recorded_at=ts, store_id=sid, harga=harga) for ts, sid, harga in trend_rows
+    ])
 
     return PriceHistoryResponse(
         product_id=product_id,
         product_name=product.nama,
-        total=len(items),
+        total=total,
         items=items,
         trend=trend,
     )

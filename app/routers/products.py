@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, status, UploadFile, File
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field
@@ -6,7 +7,7 @@ import logging
 
 from app.database import get_db
 from app.models.db_models import Product
-from app.models.schemas import ProductCategoryType, ProductPhotoUpdate
+from app.models.schemas import MAX_PAGE_SIZE, ProductCategoryType, ProductPhotoUpdate
 from app.dependencies import get_current_admin_user
 from app.services.storage_upload import upload_image
 from app.services.errors import safe_error
@@ -43,34 +44,41 @@ class ProductCatalogItem(BaseModel):
     stale: bool = Field(False, description="True bila harga yang ditampilkan berumur lebih dari 90 hari")
 
 
+def _escape_like(text: str) -> str:
+    """Escape % dan _ supaya input pengguna dicocokkan secara literal pada ILIKE."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _filter_products(query, search: Optional[str], category: Optional[str]):
+    if search and search.strip():
+        query = query.filter(Product.nama.ilike(f"%{_escape_like(search.strip())}%", escape="\\"))
+    if category and category.strip() and category.strip().lower() != "semua":
+        query = query.filter(func.lower(Product.kategori) == category.strip().lower())
+    return query
+
+
 @router.get("/", response_model=List[ProductOut], status_code=status.HTTP_200_OK)
 def get_products(
-    search: Optional[str] = Query(None, description="Filter berdasarkan nama produk (case-insensitive partial match)"),
-    category: Optional[str] = Query(None, description="Filter berdasarkan kategori produk"),
-    limit: int = Query(50, description="Maksimum jumlah produk yang dikembalikan"),
+    search: Optional[str] = Query(None, description="Filter berdasarkan nama produk (case-insensitive partial match, literal)"),
+    category: Optional[str] = Query(None, description="Filter kategori (cocok persis, tanpa beda huruf besar/kecil; 'semua' = tanpa filter)"),
+    limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE, description="Jumlah produk per halaman (maks 100)"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah produk (urut nama)"),
     db: Session = Depends(get_db)
 ):
     """
-    Mengambil daftar produk dari database lokal.
+    Mengambil daftar produk dari database lokal, berhalaman (limit/offset), urut nama.
     Dapat difilter berdasarkan nama produk ('search') dan/atau kategori ('category').
     """
-    query = db.query(Product)
-    
-    if search and search.strip():
-        query = query.filter(Product.nama.ilike(f"%{search.strip()}%"))
-        
-    if category and category.strip() and category.strip().lower() != "semua":
-        query = query.filter(Product.kategori.ilike(f"%{category.strip()}%"))
-        
-    products = query.order_by(Product.nama.asc()).limit(limit).all()
-    return products
+    query = _filter_products(db.query(Product), search, category)
+    return query.order_by(Product.nama.asc(), Product.id.asc()).offset(offset).limit(limit).all()
 
 
 @router.get("/catalog", response_model=List[ProductCatalogItem], status_code=status.HTTP_200_OK)
 def get_products_catalog(
     search: Optional[str] = Query(None, description="Filter berdasarkan nama produk"),
-    category: Optional[str] = Query(None, description="Filter berdasarkan kategori produk"),
-    limit: int = Query(100, description="Maksimum jumlah produk katalog"),
+    category: Optional[str] = Query(None, description="Filter kategori (cocok persis, tanpa beda huruf besar/kecil)"),
+    limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE, description="Jumlah produk per halaman (maks 100)"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah produk (urut nama)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -78,15 +86,8 @@ def get_products_catalog(
     """
     from app.models.db_models import Store
 
-    query = db.query(Product)
-
-    if search and search.strip():
-        query = query.filter(Product.nama.ilike(f"%{search.strip()}%"))
-
-    if category and category.strip() and category.strip().lower() != "semua":
-        query = query.filter(Product.kategori.ilike(f"%{category.strip()}%"))
-
-    products = query.order_by(Product.nama.asc()).limit(limit).all()
+    query = _filter_products(db.query(Product), search, category)
+    products = query.order_by(Product.nama.asc(), Product.id.asc()).offset(offset).limit(limit).all()
     if not products:
         return []
 

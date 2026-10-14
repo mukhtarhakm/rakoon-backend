@@ -21,6 +21,7 @@ from app.models.schemas import (
     ScanResultItem,
     ConfirmRequest,
     ConfirmResponse,
+    MAX_PAGE_SIZE,
     ProductCategory,
     VerificationStatus,
     RecentScanItem,
@@ -402,7 +403,8 @@ def confirm_scan_results(
 
 @router.get("/recent", response_model=List[RecentScanItem], status_code=status.HTTP_200_OK)
 def get_recent_scans(
-    limit: int = Query(10, description="Maksimum jumlah scan terbaru yang diambil"),
+    limit: int = Query(10, ge=1, le=MAX_PAGE_SIZE, description="Maksimum jumlah scan terbaru yang diambil (maks 100)"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah scan terbaru"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user)
 ):
@@ -420,7 +422,8 @@ def get_recent_scans(
         .outerjoin(PriceEntry, PriceEntry.scan_session_id == ScanSession.id)
         .filter(ScanSession.user_id == user_id)
         .group_by(ScanSession.id, Store.id)
-        .order_by(ScanSession.created_at.desc())
+        .order_by(ScanSession.created_at.desc(), ScanSession.id.desc())
+        .offset(offset)
         .limit(limit)
         .all()
     )

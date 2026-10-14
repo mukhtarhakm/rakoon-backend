@@ -72,6 +72,9 @@ class ScanResponse(BaseModel):
     model_used: Optional[str] = Field(None, description="Model AI yang digunakan untuk ekstraksi akhir")
     escalated_to_verification: Optional[bool] = Field(False, description="Status eskalasi verifikasi sekunder (legacy, default False)")
 
+# Ukuran halaman maksimum untuk semua endpoint daftar (limit <= 100, dengan offset).
+MAX_PAGE_SIZE = 100
+
 # Batas wajar input konfirmasi scan (anti peracunan data, P5-02).
 MAX_PRICE_RUPIAH = 10_000_000
 MAX_CONFIRM_ITEMS = 100
