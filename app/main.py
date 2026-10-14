@@ -1,5 +1,8 @@
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.routers import price, scan, stores, products, recommendation, budget_shopping, auth, ads, health
 
 app = FastAPI(
@@ -16,6 +19,14 @@ app.add_middleware(
     allow_methods=["*"],  # Mengizinkan semua HTTP methods (GET, POST, dll)
     allow_headers=["*"],  # Mengizinkan semua HTTP headers
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    # Tanpa field "input": nilai mentah klien (mis. NaN/Infinity) tidak boleh ikut diserialisasi
+    # (JSON strict gagal -> 500) dan tidak perlu dipantulkan balik.
+    errors = [{k: v for k, v in err.items() if k != "input"} for err in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
 
 @app.middleware("http")
 async def add_static_security_headers(request: Request, call_next):

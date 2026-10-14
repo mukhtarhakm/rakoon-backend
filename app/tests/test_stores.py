@@ -38,17 +38,20 @@ class TestStores(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        from app.dependencies import get_current_user
+        from app.dependencies import get_current_user, get_current_admin_user
         app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_current_admin_user, None)
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
         if os.path.exists("./test_rakoon.db"):
             os.remove("./test_rakoon.db")
 
     def setUp(self):
-        from app.dependencies import get_current_user
+        from app.dependencies import get_current_user, get_current_admin_user
         app.dependency_overrides[get_db] = override_get_db
         app.dependency_overrides[get_current_user] = lambda: "b5b07384-d113-4956-b51c-43f11075d655"
+        # POST /stores/ khusus admin; gerbang admin sendiri diuji di tests/test_admin_only_writes.py
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "b5b07384-d113-4956-b51c-43f11075d655", "role": "admin"}
         # Clean the tables before each test
         db = TestingSessionLocal()
         db.query(PriceEntry).delete()
@@ -171,7 +174,7 @@ class TestStores(unittest.TestCase):
             store_id="a5b07384-d113-4956-b51c-43f11075d654",
             harga=15000,
             sumber_user_id="b5b07384-d113-4956-b51c-43f11075d654",
-            status_verifikasi="pending"
+            status_verifikasi="verified"  # harga terkini hanya menghitung entri verified (pending tidak)
         )
         db.add(price_entry)
         db.commit()

@@ -25,8 +25,10 @@ class TestVerificationStatus(unittest.TestCase):
         self.db = TestingSessionLocal()
         self.original_get_db = app.dependency_overrides.get(get_db)
         app.dependency_overrides[get_db] = lambda: self.db
-        from app.dependencies import get_current_user
+        from app.dependencies import get_current_user, get_current_admin_user
         app.dependency_overrides[get_current_user] = lambda: self.user_id
+        # POST /price/ khusus admin; gerbang admin sendiri diuji di tests/test_admin_only_writes.py
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": self.user_id, "role": "admin"}
         self.client = TestClient(app)
 
         # Seed initial data
@@ -43,8 +45,9 @@ class TestVerificationStatus(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         Base.metadata.drop_all(bind=engine)
-        from app.dependencies import get_current_user
+        from app.dependencies import get_current_user, get_current_admin_user
         app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_current_admin_user, None)
         if self.original_get_db is not None:
             app.dependency_overrides[get_db] = self.original_get_db
         else:
@@ -186,11 +189,12 @@ class TestVerificationStatus(unittest.TestCase):
         self.assertIsNone(store_b_comparison["harga_terbaru"])
         self.assertEqual(store_b_comparison["pesan"], "Belum ada data untuk produk ini di toko ini")
 
-        # Store A and Store C must have prices
+        # Store A (verified) punya harga; Store C (hanya pending) belum punya harga terkini
         store_a_comparison = next((item for item in comparison if item["nama_toko"] == "Indomaret Sudirman"), None)
         store_c_comparison = next((item for item in comparison if item["nama_toko"] == "Superindo"), None)
         self.assertEqual(store_a_comparison["harga_terbaru"], 10000)
-        self.assertEqual(store_c_comparison["harga_terbaru"], 11000)
+        self.assertIsNone(store_c_comparison["harga_terbaru"])
+        self.assertEqual(store_c_comparison["pesan"], "Belum ada data untuk produk ini di toko ini")
 
         # "Termurah" should be Indomaret Sudirman (10000), not Alfamart Gatsu (5000 is rejected)
         self.assertEqual(comparison[0]["nama_toko"], "Indomaret Sudirman")

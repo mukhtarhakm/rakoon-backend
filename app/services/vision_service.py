@@ -7,6 +7,7 @@ from typing import Optional, List, Union, Tuple, Any
 
 import httpx
 from app.models.schemas import (
+    MAX_PRICE_RUPIAH,
     ScanResponse,
     ScanResultItem,
     ProductCategory,
@@ -174,7 +175,9 @@ def parse_raw_items(raw_items: Any) -> List[ScanResultItem]:
         # Item butuh verifikasi manual jika confidence rendah atau nama/harga belum lengkap
         is_critical_field_missing = (nama_produk is None or harga is None)
         is_any_field_null = is_critical_field_missing or (ukuran is None or satuan is None)
-        needs_verification = (confidence_val == "rendah") or is_any_field_null
+        # Harga <= 0 atau melewati batas wajar selalu butuh verifikasi, berapa pun confidence model (P5-05).
+        is_price_implausible = harga is not None and (harga <= 0 or harga > MAX_PRICE_RUPIAH)
+        needs_verification = (confidence_val == "rendah") or is_any_field_null or is_price_implausible
 
         processed.append(
             ScanResultItem(

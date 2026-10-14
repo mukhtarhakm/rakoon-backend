@@ -41,6 +41,7 @@ class TestSafeError(unittest.TestCase):
 
     def test_price_endpoints_do_not_leak_raw_exception(self):
         app.dependency_overrides[get_current_user] = lambda: "user-123"
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "user-123", "role": "admin"}
         mock_db = MagicMock()
         mock_db.add.side_effect = Exception("FATAL: connection leaked secret_token_xyz")
         mock_db.query.side_effect = Exception("FATAL: query leaked table_schema_abc")
@@ -71,10 +72,12 @@ class TestSafeError(unittest.TestCase):
             self.assertIn("Terjadi kesalahan saat memproses perbandingan harga.", res_comp.json().get("detail", ""))
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_current_admin_user, None)
             app.dependency_overrides.pop(get_db, None)
 
     def test_stores_post_does_not_leak_raw_exception(self):
         app.dependency_overrides[get_current_user] = lambda: "user-123"
+        app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "user-123", "role": "admin"}
         mock_db = MagicMock()
         mock_db.commit.side_effect = Exception("PG_EXCEPTION: relation stores_hidden_data violates check constraint")
         app.dependency_overrides[get_db] = lambda: mock_db
@@ -92,6 +95,7 @@ class TestSafeError(unittest.TestCase):
             self.assertEqual(res.json().get("detail"), "Gagal menyimpan data toko ke database.")
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_current_admin_user, None)
             app.dependency_overrides.pop(get_db, None)
 
     def test_budget_shopping_does_not_leak_raw_exception(self):
@@ -123,6 +127,7 @@ class TestSafeError(unittest.TestCase):
     def test_scan_confirm_does_not_leak_raw_exception(self):
         app.dependency_overrides[get_current_user] = lambda: {"id": "user-123"}
         mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.scalar.return_value = 0  # kuota harian: belum terpakai
         mock_db.commit.side_effect = Exception("DB_LOCK_TIMEOUT: deadlocked on pg_catalog._secret_lock")
         app.dependency_overrides[get_db] = lambda: mock_db
 

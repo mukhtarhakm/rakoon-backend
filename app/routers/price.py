@@ -5,13 +5,14 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Union, Optional
 from datetime import datetime
-from app.models.schemas import PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem, VerificationStatus
+from app.models.schemas import MAX_PAGE_SIZE, PriceEntryCreate, PriceEntryOut, PriceHistoryResponse, PriceCompareResponse, PriceCompareItem, VerificationStatus
 from app.models.db_models import PriceEntry, Product
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin_user
 from app.services import price_history_service
+from app.services.current_price import get_current_prices
 from app.services.price_history_service import DateRange
-from app.routers.stores import get_nearby_stores
+from app.routers.stores import get_nearby_stores, MAX_SEARCH_RADIUS_KM
 from app.services.errors import safe_error
 
 logger = logging.getLogger("rakoon_backend.price")
@@ -42,10 +43,11 @@ def parse_product_id(product_id: str) -> Union[int, str]:
 def create_price_entry(
     price_data: PriceEntryCreate,
     db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user)
+    user_id: str = Depends(get_current_user),
+    admin_user: dict = Depends(get_current_admin_user)
 ):
     """
-    Simpan entri harga baru ke database.
+    Simpan entri harga baru ke database (khusus admin; pengguna biasa memakai POST /scan/confirm).
     Status verifikasi default diatur menjadi "verified".
     """
     try:
@@ -176,6 +178,8 @@ def get_price_history_v1(
     range: Optional[DateRange] = Query(DateRange.ALL, description="Filter rentang tanggal ('1m', '3m', '6m', 'all')"),
     start_date: Optional[datetime] = Query(None, description="Batas awal tanggal (opsional, ISO 8601 format)"),
     end_date: Optional[datetime] = Query(None, description="Batas akhir tanggal (opsional, ISO 8601 format)"),
+    limit: int = Query(MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Jumlah entri per halaman (maks 100); offset 0 = entri terbaru"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah entri terbaru"),
     db: Session = Depends(get_db),
 ):
     """
@@ -195,6 +199,13 @@ def get_price_history_v1(
             range_enum=range,
             start_date=start_date,
             end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )
+    except price_history_service.DateRangeError as de:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(de),
         )
     except ValueError as ve:
         raise HTTPException(
@@ -215,6 +226,8 @@ def get_price_history_v1(
 def get_price_history(
     product_id: str,
     store_id: Optional[str] = Query(None, description="Filter berdasarkan ID toko (opsional)"),
+    limit: int = Query(MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Jumlah entri per halaman (maks 100)"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah entri (terbaru lebih dulu)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -239,7 +252,7 @@ def get_price_history(
             query = query.filter(PriceEntry.store_id == store_id)
             
         # Urutkan berdasarkan timestamp descending (terbaru dahulu)
-        records = query.order_by(PriceEntry.timestamp.desc()).all()
+        records = query.order_by(PriceEntry.timestamp.desc(), PriceEntry.id.desc()).offset(offset).limit(limit).all()
         
         # Jika data kosong, kembalikan pesan "Belum ada data historis" dengan status 200 OK
         if not records:
@@ -264,9 +277,9 @@ def get_price_history(
 @router.get("/compare/{product_id}", response_model=PriceCompareResponse)
 def get_price_comparison(
     product_id: str,
-    lat: float = Query(..., description="Latitude koordinat pengguna"),
-    lng: float = Query(..., description="Longitude koordinat pengguna"),
-    radius_km: float = Query(5.0, description="Radius pencarian dalam kilometer"),
+    lat: float = Query(..., ge=-90, le=90, description="Latitude koordinat pengguna"),
+    lng: float = Query(..., ge=-180, le=180, description="Longitude koordinat pengguna"),
+    radius_km: float = Query(5.0, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian dalam kilometer"),
     db: Session = Depends(get_db)
 ):
     """
@@ -296,49 +309,9 @@ def get_price_comparison(
         stores_response = get_nearby_stores(lat=lat, lng=lng, radius_km=radius_km, db=db)
         nearby_stores = stores_response.stores
 
-        # 4. Batch-fetch latest verified price entry per store (single SQL query, no N+1)
-        #    Strategy: subquery selects MAX(timestamp) per store_id for this product,
-        #    then we join back to get the full PriceEntry row.
-        store_ids = [store.store_id for store in nearby_stores]
-
-        latest_prices: dict[str, "PriceEntry"] = {}
-        if store_ids:
-            from sqlalchemy import func, and_
-            from sqlalchemy.orm import aliased
-
-            # Subquery: for each store, find the latest non-rejected timestamp
-            sub = (
-                db.query(
-                    PriceEntry.store_id.label("store_id"),
-                    func.max(PriceEntry.timestamp).label("max_ts"),
-                )
-                .filter(
-                    PriceEntry.product_id == prod_id_parsed,
-                    PriceEntry.store_id.in_(store_ids),
-                    PriceEntry.status_verifikasi != VerificationStatus.REJECTED,
-                )
-                .group_by(PriceEntry.store_id)
-                .subquery()
-            )
-
-            # Main query: join PriceEntry to the subquery on (store_id, timestamp)
-            pe_alias = aliased(PriceEntry)
-            rows = (
-                db.query(pe_alias)
-                .join(
-                    sub,
-                    and_(
-                        pe_alias.store_id == sub.c.store_id,
-                        pe_alias.timestamp == sub.c.max_ts,
-                    ),
-                )
-                .filter(pe_alias.product_id == prod_id_parsed)
-                .all()
-            )
-
-            # Build lookup dict: store_id → PriceEntry
-            for row in rows:
-                latest_prices[str(row.store_id)] = row
+        # 4. Harga terkini per toko (aturan bersama: terbaru, verified saja, stale > 90 hari)
+        current = get_current_prices(db, [prod_id_parsed], [store.store_id for store in nearby_stores])
+        latest_prices = {sid: price for (_pid, sid), price in current.items()}
 
         # 5. Build comparison list using O(1) dict lookup per store
         comparison_list = []
@@ -355,8 +328,9 @@ def get_price_comparison(
                         jarak_km=store.jarak_km,
                         harga_terbaru=entry.harga,
                         tanggal_update=entry.timestamp,
-                        status_verifikasi=entry.status_verifikasi,
+                        status_verifikasi=VerificationStatus.VERIFIED.value,
                         pesan=None,
+                        stale=entry.stale,
                     )
                 )
             else:

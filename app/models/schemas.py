@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, BeforeValidator
+from pydantic import BaseModel, Field, BeforeValidator, field_validator
 from datetime import datetime
 from typing import Optional, Union, List, Annotated, Any
 from uuid import UUID
@@ -72,21 +72,39 @@ class ScanResponse(BaseModel):
     model_used: Optional[str] = Field(None, description="Model AI yang digunakan untuk ekstraksi akhir")
     escalated_to_verification: Optional[bool] = Field(False, description="Status eskalasi verifikasi sekunder (legacy, default False)")
 
+# Ukuran halaman maksimum untuk semua endpoint daftar (limit <= 100, dengan offset).
+MAX_PAGE_SIZE = 100
+
+# Batas wajar input konfirmasi scan (anti peracunan data, P5-02).
+MAX_PRICE_RUPIAH = 10_000_000
+MAX_CONFIRM_ITEMS = 100
+MAX_PRODUCT_NAME_LENGTH = 200
+
+
 class ConfirmItem(BaseModel):
-    nama_produk: str = Field(..., description="Nama produk yang dikonfirmasi")
-    harga: int = Field(..., description="Harga produk hasil konfirmasi/koreksi")
+    nama_produk: str = Field(..., max_length=MAX_PRODUCT_NAME_LENGTH, description="Nama produk yang dikonfirmasi")
+    harga: int = Field(..., gt=0, le=MAX_PRICE_RUPIAH, description="Harga produk hasil konfirmasi/koreksi (Rp, > 0)")
     ukuran: Optional[float] = Field(None, description="Ukuran produk (nullable)")
     satuan: Optional[str] = Field(None, description="Satuan ukuran produk (nullable)")
     kategori: ProductCategoryType = Field(default=ProductCategory.LAINNYA, description="Kategori produk hasil konfirmasi/koreksi")
 
+    @field_validator("nama_produk")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Nama produk tidak boleh kosong")
+        return v
+
 class ConfirmRequest(BaseModel):
     store_id: Union[int, str, UUID] = Field(..., description="ID dari toko tempat scan dilakukan")
     user_id: Union[int, str, UUID] = Field(..., description="ID dari pengguna yang melakukan konfirmasi")
-    items: List[ConfirmItem] = Field(..., description="Daftar item hasil scan yang dikonfirmasi")
+    items: List[ConfirmItem] = Field(..., min_length=1, max_length=MAX_CONFIRM_ITEMS, description="Daftar item hasil scan yang dikonfirmasi (1-100)")
 
 class ConfirmResponse(BaseModel):
     items_saved: int = Field(..., description="Jumlah entri harga yang berhasil disimpan")
     products_created: int = Field(..., description="Jumlah produk baru yang berhasil dibuat")
+    items_pending_review: int = Field(0, description="Jumlah entri harga yang menunggu verifikasi (di luar kisaran wajar)")
     message: str = Field(..., description="Pesan status konfirmasi")
     scan_session_id: Optional[str] = Field(None, description="ID sesi scan yang dibuat")
 
@@ -177,6 +195,7 @@ class PriceCompareItem(BaseModel):
     tanggal_update: Optional[datetime] = Field(None, description="Tanggal update harga terbaru")
     status_verifikasi: Optional[str] = Field(None, description="Status verifikasi harga")
     pesan: Optional[str] = Field(None, description="Pesan status ketersediaan harga")
+    stale: bool = Field(False, description="True bila harga terbaru berumur lebih dari 90 hari")
 
 class PriceCompareResponse(BaseModel):
     product_id: Union[int, str] = Field(..., description="ID dari produk")
@@ -199,6 +218,7 @@ class RecommendedProductItem(BaseModel):
     nama_toko: str = Field(..., description="Nama toko terdekat tempat harga dicatat")
     jarak_km: Optional[float] = Field(None, description="Jarak toko dari lokasi pengguna dalam km")
     updated_at: str = Field(..., description="Waktu update harga (relatif atau ISO)")
+    stale: bool = Field(False, description="True bila harga berumur lebih dari 90 hari")
     foto_url: Optional[str] = Field(None, description="URL foto produk")
 
 
@@ -262,13 +282,19 @@ class RecommendationResponse(BaseModel):
 # FEATURE: SMART BUDGET SHOPPING ASSISTANT SCHEMAS
 # ==============================================================================
 
+# Batas input asisten anggaran (anti DoS, P8-05).
+MAX_BUDGET_ITEMS = 50
+MAX_ITEM_QTY = 99
+MAX_BUDGET_RUPIAH = 1_000_000_000
+
+
 class BudgetItemInput(BaseModel):
     product_id: Union[int, str, UUID] = Field(..., description="ID produk yang ingin dibeli")
-    qty: int = Field(..., gt=0, description="Kuantitas/jumlah produk yang dibeli (harus > 0)")
+    qty: int = Field(..., gt=0, le=MAX_ITEM_QTY, description="Kuantitas/jumlah produk yang dibeli (1-99)")
 
 class BudgetRecommendRequest(BaseModel):
-    budget: float = Field(..., gt=0, description="Total budget yang dialokasikan pengguna dalam Rupiah")
-    items: List[BudgetItemInput] = Field(..., min_length=1, description="Daftar barang dan kuantitas yang dibutuhkan")
+    budget: float = Field(..., gt=0, le=MAX_BUDGET_RUPIAH, allow_inf_nan=False, description="Total budget yang dialokasikan pengguna dalam Rupiah")
+    items: List[BudgetItemInput] = Field(..., min_length=1, max_length=MAX_BUDGET_ITEMS, description="Daftar barang dan kuantitas yang dibutuhkan (1-50)")
     lat: Optional[float] = Field(None, description="Latitude lokasi pengguna (opsional)")
     lng: Optional[float] = Field(None, description="Longitude lokasi pengguna (opsional)")
 
@@ -278,6 +304,8 @@ class BudgetItemResult(BaseModel):
     qty: int = Field(..., description="Jumlah item yang dibeli")
     harga_satuan: float = Field(..., description="Harga satuan produk di toko terpilih")
     subtotal: float = Field(..., description="Subtotal harga (harga_satuan * qty)")
+    tanggal_harga: Optional[datetime] = Field(None, description="Waktu harga satuan dicatat")
+    stale: bool = Field(False, description="True bila harga satuan berumur lebih dari 90 hari")
 
 class StoreInfoOutput(BaseModel):
     store_id: str = Field(..., description="ID dari toko")
@@ -293,6 +321,7 @@ class ProductAvailability(BaseModel):
     is_available: bool = Field(..., description="True jika produk tersedia di setidaknya satu toko")
     harga_terendah: Optional[float] = Field(None, description="Harga terendah produk di toko yang menyediakannya")
     toko_terendah: Optional[str] = Field(None, description="Nama toko yang memiliki harga terendah tersebut")
+    stale: bool = Field(False, description="True bila harga terendah berumur lebih dari 90 hari")
 
 class AlternativeStoreOutput(BaseModel):
     store_info: StoreInfoOutput

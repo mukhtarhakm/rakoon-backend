@@ -8,9 +8,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin_user
 from app.models.db_models import Store, PriceEntry
 from app.services.errors import safe_error
+from app.services.current_price import get_current_prices
+from app.models.schemas import MAX_PAGE_SIZE
 from pydantic import BaseModel, Field
 
 # Setup logger
@@ -41,6 +43,7 @@ class StoreProductItem(BaseModel):
     harga: float = Field(..., description="Harga produk di toko ini")
     foto_url: Optional[str] = Field(None, description="Foto produk")
     updated_at: Optional[str] = Field(None, description="Waktu update")
+    stale: bool = Field(False, description="True bila harga berumur lebih dari 90 hari")
 
 class StoreCreate(BaseModel):
     nama: str = Field(..., description="Nama toko")
@@ -87,11 +90,15 @@ def get_candidate_stores(db: Session, lat: float, lng: float, radius_km: float) 
     ).all()
 
 
+# Batas radius pencarian (km) untuk semua endpoint berbasis lokasi (P7-08).
+MAX_SEARCH_RADIUS_KM = 100.0
+
+
 @router.get("/nearby", response_model=NearbyStoresResponse, status_code=status.HTTP_200_OK)
 def get_nearby_stores(
-    lat: float = Query(..., description="Latitude koordinat pengguna"),
-    lng: float = Query(..., description="Longitude koordinat pengguna"),
-    radius_km: float = Query(5.0, description="Radius pencarian dalam kilometer"),
+    lat: float = Query(..., ge=-90, le=90, description="Latitude koordinat pengguna"),
+    lng: float = Query(..., ge=-180, le=180, description="Longitude koordinat pengguna"),
+    radius_km: float = Query(5.0, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian dalam kilometer"),
     db: Session = Depends(get_db)
 ):
     """
@@ -115,7 +122,7 @@ def get_nearby_stores(
             db.query(PriceEntry.store_id, func.count(func.distinct(PriceEntry.product_id)))
             .filter(
                 PriceEntry.store_id.in_(store_ids),
-                PriceEntry.status_verifikasi != "rejected"
+                PriceEntry.status_verifikasi == "verified"  # selaras dengan harga terkini: pending/rejected tidak dihitung
             )
             .group_by(PriceEntry.store_id)
             .all()
@@ -151,58 +158,55 @@ def get_nearby_stores(
 
 @router.get("/{store_id}/products", response_model=List[StoreProductItem], status_code=status.HTTP_200_OK)
 @router.get("/api/v1/stores/{store_id}/products", response_model=List[StoreProductItem], status_code=status.HTTP_200_OK)
-def get_store_products(store_id: str, db: Session = Depends(get_db)):
+def get_store_products(
+    store_id: str,
+    limit: int = Query(MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Jumlah produk per halaman (maks 100)"),
+    offset: int = Query(0, ge=0, description="Lewati sejumlah produk (urut nama)"),
+    db: Session = Depends(get_db),
+):
     """
-    Mengambil daftar produk yang dijual di toko tertentu beserta harganya.
+    Mengambil daftar produk yang dijual di toko tertentu beserta harga terkini (aturan bersama:
+    terbaru, verified saja, stale > 90 hari), berhalaman dan urut nama.
     """
-    from app.models.db_models import PriceEntry, Product
-    
-    entries = (
-        db.query(PriceEntry)
-        .filter(PriceEntry.store_id == store_id, PriceEntry.status_verifikasi != "rejected")
-        .order_by(PriceEntry.timestamp.desc())
+    from app.models.db_models import Product
+
+    prices = {pid: price for (pid, _sid), price in get_current_prices(db, store_ids=[store_id]).items()}
+    if not prices:
+        return []
+
+    products = (
+        db.query(Product)
+        .filter(Product.id.in_(list(prices)))
+        .order_by(Product.nama.asc(), Product.id.asc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
-    
-    latest_by_product = {}
-    for pe in entries:
-        pid = str(pe.product_id)
-        if pid not in latest_by_product:
-            latest_by_product[pid] = pe
-            
-    products_out = []
-    if latest_by_product:
-        p_ids = list(latest_by_product.keys())
-        products = db.query(Product).filter(Product.id.in_(p_ids)).all()
-        prod_map = {str(p.id): p for p in products}
-        
-        for pid, pe in latest_by_product.items():
-            prod = prod_map.get(pid)
-            if prod:
-                products_out.append(
-                    StoreProductItem(
-                        id=str(prod.id),
-                        nama=prod.nama,
-                        kategori=prod.kategori or "Umum",
-                        ukuran=prod.ukuran,
-                        satuan=prod.satuan,
-                        harga=float(pe.harga),
-                        foto_url=getattr(prod, "foto_url", None),
-                        updated_at=pe.timestamp.isoformat() if pe.timestamp else None
-                    )
-                )
-    
-    return products_out
+    return [
+        StoreProductItem(
+            id=str(prod.id),
+            nama=prod.nama,
+            kategori=prod.kategori or "Umum",
+            ukuran=prod.ukuran,
+            satuan=prod.satuan,
+            harga=float(prices[str(prod.id)].harga),
+            foto_url=getattr(prod, "foto_url", None),
+            updated_at=prices[str(prod.id)].timestamp.isoformat(),
+            stale=prices[str(prod.id)].stale,
+        )
+        for prod in products
+    ]
 
 
 @router.post("/", response_model=StoreCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_store(
     store_data: StoreCreate,
     db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user)
+    user_id: str = Depends(get_current_user),
+    admin_user: dict = Depends(get_current_admin_user)
 ):
     """
-    Menambahkan toko baru secara manual ke database.
+    Menambahkan toko baru secara manual ke database (khusus admin; pengguna mengajukan toko lewat /ads/submit-new-store).
     Validasi nama toko tidak boleh kosong, dan lat/lng harus dalam rentang koordinat bumi yang valid.
     """
     # Validasi nama tidak boleh kosong
