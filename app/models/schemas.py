@@ -101,6 +101,7 @@ class ConfirmRequest(BaseModel):
 class ConfirmResponse(BaseModel):
     items_saved: int = Field(..., description="Jumlah entri harga yang berhasil disimpan")
     products_created: int = Field(..., description="Jumlah produk baru yang berhasil dibuat")
+    items_pending_review: int = Field(0, description="Jumlah entri harga yang menunggu verifikasi (di luar kisaran wajar)")
     message: str = Field(..., description="Pesan status konfirmasi")
     scan_session_id: Optional[str] = Field(None, description="ID sesi scan yang dibuat")
 

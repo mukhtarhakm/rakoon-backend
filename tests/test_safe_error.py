@@ -123,6 +123,7 @@ class TestSafeError(unittest.TestCase):
     def test_scan_confirm_does_not_leak_raw_exception(self):
         app.dependency_overrides[get_current_user] = lambda: {"id": "user-123"}
         mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.scalar.return_value = 0  # kuota harian: belum terpakai
         mock_db.commit.side_effect = Exception("DB_LOCK_TIMEOUT: deadlocked on pg_catalog._secret_lock")
         app.dependency_overrides[get_db] = lambda: mock_db
 

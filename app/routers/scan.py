@@ -4,6 +4,7 @@ import json
 import re
 import time
 import logging
+import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional, List, Union
@@ -145,6 +146,14 @@ class SimpleRateLimiter:
 scan_rate_limiter = SimpleRateLimiter(max_requests=10, window_seconds=60)
 MAX_SCAN_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 
+# Moderasi harga hasil konfirmasi (P5-02): harga di luar [0.3x, 3x] median harga terverifikasi produk
+# menjadi 'pending'. Median baru dipakai bila ada cukup sampel terverifikasi.
+PRICE_BAND_LOW_FACTOR = 0.3
+PRICE_BAND_HIGH_FACTOR = 3.0
+PRICE_BAND_MIN_SAMPLES = 3
+# Jumlah entri harga yang boleh dikonfirmasi satu pengguna per hari (UTC).
+DAILY_CONFIRM_ITEM_QUOTA = 200
+
 
 @router.post("/", response_model=ScanResponse, status_code=status.HTTP_200_OK)
 async def scan_shelf_photo(
@@ -220,9 +229,26 @@ def _find_product_by_name(db: Session, clean_name: str) -> Optional[Product]:
     return db.query(Product).filter(func.lower(Product.nama) == clean_name.lower()).first()
 
 
+def _price_status(db: Session, product_id, harga: int) -> VerificationStatus:
+    """VERIFIED bila harga dalam pita wajar median harga terverifikasi produk, selain itu PENDING."""
+    samples = [
+        h for (h,) in db.query(PriceEntry.harga)
+        .filter(PriceEntry.product_id == product_id, PriceEntry.status_verifikasi == VerificationStatus.VERIFIED.value)
+        .all()
+    ]
+    # shortcut: produk dengan < PRICE_BAND_MIN_SAMPLES data terverifikasi tidak dimoderasi; upgrade bila data tipis jadi masalah.
+    if len(samples) < PRICE_BAND_MIN_SAMPLES:
+        return VerificationStatus.VERIFIED
+    median = statistics.median(samples)
+    if median * PRICE_BAND_LOW_FACTOR <= harga <= median * PRICE_BAND_HIGH_FACTOR:
+        return VerificationStatus.VERIFIED
+    return VerificationStatus.PENDING
+
+
 def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> ConfirmResponse:
     items_saved = 0
     products_created = 0
+    items_pending = 0
 
     now_utc = datetime.now(timezone.utc)
     # 1. Buat satu scan_session untuk batch konfirmasi ini
@@ -267,12 +293,15 @@ def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> Confi
             products_created += 1
 
         # Insert ke tabel price_entries untuk tiap item dengan scan_session_id
+        entry_status = _price_status(db, product_id, item.harga)
+        if entry_status == VerificationStatus.PENDING:
+            items_pending += 1
         db.add(PriceEntry(
             product_id=product_id,
             store_id=store_id,
             harga=item.harga,
             sumber_user_id=user_id,
-            status_verifikasi=VerificationStatus.VERIFIED,
+            status_verifikasi=entry_status,
             scan_session_id=scan_session.id,
             timestamp=now_utc
         ))
@@ -281,10 +310,14 @@ def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> Confi
     # Commit seluruh perubahan sekaligus secara atomic
     db.commit()
 
+    message = f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru."
+    if items_pending:
+        message += f" {items_pending} entri menunggu verifikasi karena harga di luar kisaran wajar."
     return ConfirmResponse(
         items_saved=items_saved,
         products_created=products_created,
-        message=f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru.",
+        items_pending_review=items_pending,
+        message=message,
         scan_session_id=str(scan_session.id)
     )
 
@@ -319,6 +352,28 @@ def confirm_scan_results(
         )
     if not store_exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toko tidak ditemukan.")
+
+    # Kuota harian per pengguna (UTC): seluruh permintaan ditolak bila melewati batas, tidak disimpan sebagian.
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        used_today = (
+            db.query(func.count(PriceEntry.id))
+            .filter(PriceEntry.sumber_user_id == user_id, PriceEntry.timestamp >= day_start)
+            .scalar()
+        ) or 0
+    except Exception as e:
+        raise safe_error(
+            logger,
+            e,
+            "Terjadi kesalahan saat menyimpan konfirmasi scan.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            log_prefix="Error checking daily confirm quota",
+        )
+    if used_today + len(request_data.items) > DAILY_CONFIRM_ITEM_QUOTA:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Kuota konfirmasi harian tercapai (maksimum {DAILY_CONFIRM_ITEM_QUOTA} entri harga per hari). Coba lagi besok.",
+        )
 
     for attempt in (1, 2):
         try:
