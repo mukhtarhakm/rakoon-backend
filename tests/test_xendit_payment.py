@@ -756,7 +756,7 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertEqual(result["invoice_url"], "https://checkout.xendit.co/inv-reconciled")
         mock_get_by_ext.assert_called_once_with("INV-20261010-RECON", client=mock_client)
 
-    # 25. Payment status endpoint reconciles paid invoice from Xendit API fallback
+    # 25. POST reconcile-payment reconciles paid invoice from Xendit API fallback
     @patch("app.services.xendit_service.get_invoice_by_id")
     @patch("app.services.xendit_service.create_invoice")
     def test_25_payment_status_reconciles_paid_invoice_from_xendit_api(self, mock_create_inv, mock_get_by_id):
@@ -782,8 +782,8 @@ class TestXenditPaymentIntegration(unittest.TestCase):
             "paid_at": "2026-10-13T12:00:00Z",
         }
 
-        # Check status -> must reconcile to PAID
-        status_res = self.client.get(f"/ads/campaigns/{campaign_id}/payment-status")
+        # Rekonsiliasi eksplisit (POST) -> must reconcile to PAID
+        status_res = self.client.post(f"/ads/campaigns/{campaign_id}/reconcile-payment")
         self.assertEqual(status_res.status_code, 200)
         status_data = status_res.json()
         self.assertEqual(status_data["payment_status"], "paid")
@@ -796,7 +796,7 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertEqual(campaign.payment_status, "paid")
         self.assertEqual(campaign.status, "active")
 
-    # 26. Payment status endpoint reconciles expired invoice from Xendit API fallback
+    # 26. POST reconcile-payment reconciles expired invoice from Xendit API fallback
     @patch("app.services.xendit_service.get_invoice_by_id")
     @patch("app.services.xendit_service.create_invoice")
     def test_26_payment_status_reconciles_expired_invoice_from_xendit_api(self, mock_create_inv, mock_get_by_id):
@@ -820,7 +820,7 @@ class TestXenditPaymentIntegration(unittest.TestCase):
             "status": "EXPIRED",
         }
 
-        status_res = self.client.get(f"/ads/campaigns/{campaign_id}/payment-status")
+        status_res = self.client.post(f"/ads/campaigns/{campaign_id}/reconcile-payment")
         self.assertEqual(status_res.status_code, 200)
         self.assertEqual(status_res.json()["transaction_status"], "EXPIRED")
 
@@ -846,7 +846,7 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertEqual(called_payload["success_redirect_url"], "rakoon://checkout/success")
         self.assertEqual(called_payload["failure_redirect_url"], "rakoon://checkout/failure")
 
-    # 28. get_my_store endpoint reconciles pending campaigns with Xendit API
+    # 28. POST /my-store/reconcile-payments reconciles pending campaigns with Xendit API
     @patch("app.services.xendit_service.get_invoice_by_id")
     @patch("app.services.xendit_service.create_invoice")
     def test_28_get_my_store_reconciles_pending_campaign(self, mock_create_inv, mock_get_by_id):
@@ -872,8 +872,8 @@ class TestXenditPaymentIntegration(unittest.TestCase):
             "paid_at": "2026-10-13T12:00:00Z",
         }
 
-        # Query /my-store -> campaign must be active and paid
-        res = self.client.get("/ads/my-store")
+        # Rekonsiliasi eksplisit (POST) -> campaign must be active and paid
+        res = self.client.post("/ads/my-store/reconcile-payments")
         self.assertEqual(res.status_code, 200)
         c_list = res.json()["campaigns"]
         matching = [c for c in c_list if c["id"] == campaign_id]
@@ -1318,6 +1318,141 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["external_id"], first_ext)
         self.assertEqual(len(self._txs(cid)), 1)
+
+
+    # ---- P4-05 / P1-10 / P4-09: GET hanya membaca, rekonsiliasi lewat POST eksplisit ----
+
+    def _commit_spy(self):
+        from sqlalchemy.orm import Session
+        original = Session.commit
+        calls = []
+
+        def spy(session_self):
+            calls.append(1)
+            return original(session_self)
+
+        return calls, patch.object(Session, "commit", spy)
+
+    @patch("app.services.xendit_service.get_invoice_by_external_id")
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_53_get_payment_status_and_my_store_do_not_commit_or_call_xendit(self, mock_create_inv, mock_by_id, mock_by_ext):
+        cids = []
+        for _ in range(3):
+            cid, _ext, _inv = self._pay_campaign(mock_create_inv)
+            cids.append(cid)
+        mock_by_id.return_value = {"status": "PAID", "paid_amount": 15000}
+        mock_by_ext.return_value = {"status": "PAID", "paid_amount": 15000}
+
+        calls, spy = self._commit_spy()
+        with spy:
+            self.assertEqual(self.client.get(f"/ads/campaigns/{cids[0]}/payment-status").status_code, 200)
+            self.assertEqual(self.client.get(f"/ads/campaigns/{cids[0]}").status_code, 200)
+            my_store = self.client.get("/ads/my-store")
+        self.assertEqual(my_store.status_code, 200)
+        self.assertEqual(calls, [], "GET tidak boleh commit")
+        mock_by_id.assert_not_called()
+        mock_by_ext.assert_not_called()
+        self.assertEqual({c["payment_status"] for c in my_store.json()["campaigns"]}, {"unpaid"})
+        self.db.expire_all()
+        self.assertEqual({t.status for t in self.db.query(PaymentTransaction).all()}, {"PENDING"})
+
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_54_reconcile_payment_endpoint_activates_paid_campaign(self, mock_create_inv, mock_by_id):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        mock_by_id.return_value = {"id": inv_id, "external_id": ext_id, "status": "PAID", "paid_amount": 15000}
+
+        res = self.client.post(f"/ads/campaigns/{cid}/reconcile-payment")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["transaction_status"], "PAID")
+        self.assertEqual((res.json()["campaign_status"], res.json()["payment_status"]), ("active", "paid"))
+        mock_by_id.assert_called_once()
+
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_55_reconcile_payment_endpoint_is_owner_only(self, mock_create_inv, mock_by_id):
+        cid, _ext, _inv = self._pay_campaign(mock_create_inv)
+        app.dependency_overrides[get_current_user] = lambda: OTHER_USER_ID
+        self.assertEqual(self.client.post(f"/ads/campaigns/{cid}/reconcile-payment").status_code, 403)
+        self.assertEqual(
+            self.client.post("/ads/campaigns/00000000-0000-0000-0000-000000000000/reconcile-payment").status_code, 404
+        )
+        mock_by_id.assert_not_called()
+
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_56_reconcile_expired_writes_expired_and_allows_repay(self, mock_create_inv, mock_by_id):
+        cid, ext_id, inv_id = self._pay_campaign(mock_create_inv)
+        mock_by_id.return_value = {"id": inv_id, "external_id": ext_id, "status": "EXPIRED"}
+
+        res = self.client.post(f"/ads/campaigns/{cid}/reconcile-payment")
+        self.assertEqual(res.json()["transaction_status"], "EXPIRED")
+        self.assertEqual(self._txs(cid)[0].status, "EXPIRED")
+        self.assertEqual(res.json()["campaign_status"], "pending_payment")  # kampanye tetap bisa dibayar ulang
+
+        again = self.client.post(f"/ads/campaigns/{cid}/pay")
+        self.assertEqual(again.status_code, 200)
+        self.assertNotEqual(again.json()["external_id"], ext_id)
+
+    @patch("app.services.xendit_service.get_invoice_by_id")
+    @patch("app.services.xendit_service.create_invoice")
+    def test_57_my_store_reconcile_only_touches_own_pending_campaigns(self, mock_create_inv, mock_by_id):
+        cid_a, ext_a, inv_a = self._pay_campaign(mock_create_inv)
+        cid_b, ext_b, inv_b = self._pay_campaign(mock_create_inv)
+        other = AdCampaign(
+            store_id=self.store.id, owner_user_id=OTHER_USER_ID, title="Milik Orang Lain",
+            banner_url="https://example.com/o.jpg", duration_days=3, price_paid=15000,
+            payment_ref="INV-OTHER", status="pending_payment", payment_status="unpaid",
+            start_at=datetime.now(timezone.utc), expires_at=datetime.now(timezone.utc) + timedelta(days=3),
+        )
+        self.db.add(other)
+        self.db.flush()
+        self.db.add(PaymentTransaction(
+            campaign_id=other.id, owner_user_id=OTHER_USER_ID, external_id="INV-OTHER", amount=15000,
+            status="PENDING", invoice_url="https://x", xendit_invoice_id="xinv_other",
+        ))
+        self.db.commit()
+        mock_by_id.side_effect = lambda inv_id: {"id": inv_id, "status": "PAID", "paid_amount": 15000}
+
+        res = self.client.post("/ads/my-store/reconcile-payments")
+        self.assertEqual(res.status_code, 200)
+        by_id = {c["id"]: c for c in res.json()["campaigns"]}
+        self.assertEqual(by_id[cid_a]["payment_status"], "paid")
+        self.assertEqual(by_id[cid_b]["payment_status"], "paid")
+        self.assertEqual(by_id[str(other.id)]["payment_status"], "unpaid")
+        self.assertEqual(mock_by_id.call_count, 2)
+
+    def test_58_reconcile_endpoints_return_503_when_xendit_not_configured(self):
+        cid = self._create_pending_campaign()["id"]
+        os.environ.pop("XENDIT_SECRET_KEY", None)
+        self.assertEqual(self.client.post(f"/ads/campaigns/{cid}/reconcile-payment").status_code, 503)
+        self.assertEqual(self.client.post("/ads/my-store/reconcile-payments").status_code, 503)
+
+    # ---- P4-09: token webhook wajib di konfigurasi ----
+
+    def test_59_xendit_config_requires_webhook_token(self):
+        from app.services import xendit_service
+        for token in (None, "", "   "):
+            with self.subTest(token=token):
+                if token is None:
+                    os.environ.pop("XENDIT_WEBHOOK_TOKEN", None)
+                else:
+                    os.environ["XENDIT_WEBHOOK_TOKEN"] = token
+                with self.assertRaises(xendit_service.XenditConfigError) as ctx:
+                    xendit_service.get_xendit_config()
+                self.assertIn("XENDIT_WEBHOOK_TOKEN", str(ctx.exception))
+                self.assertFalse(xendit_service.is_xendit_sandbox_configured())
+
+    @patch("app.services.xendit_service.create_invoice")
+    def test_60_pay_returns_503_without_webhook_token(self, mock_create_inv):
+        cid = self._create_pending_campaign()["id"]
+        os.environ.pop("XENDIT_WEBHOOK_TOKEN", None)
+        res = self.client.post(f"/ads/campaigns/{cid}/pay")
+        mock_create_inv.assert_not_called()
+        self.assertEqual(res.status_code, 503)
+        self.assertIn("XENDIT_WEBHOOK_TOKEN", res.json()["detail"])
+        self.assertNotIn(CALLBACK_TOKEN, res.text)
 
 
 if __name__ == "__main__":

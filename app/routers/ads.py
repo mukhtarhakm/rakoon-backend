@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File
 from fastapi.responses import FileResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field
@@ -591,19 +591,6 @@ def get_my_store(
         .all()
     )
 
-    # Reconcile pending campaigns with Xendit API as fallback for missed/delayed webhooks
-    if xendit_service.is_xendit_sandbox_configured():
-        for c in campaigns:
-            if c.status == "pending_payment" or c.payment_status == "unpaid":
-                tx = (
-                    db.query(PaymentTransaction)
-                    .filter(PaymentTransaction.campaign_id == c.id)
-                    .order_by(PaymentTransaction.created_at.desc())
-                    .first()
-                )
-                if tx and tx.status == "PENDING":
-                    _reconcile_transaction_with_xendit(tx, c, db)
-
     items = []
     for c in campaigns:
         exp_utc = _ensure_utc(c.expires_at)
@@ -646,6 +633,42 @@ def get_my_store(
         store_photo_url=getattr(owner, "store_photo_url", None),
         campaigns=items
     )
+
+
+@router.post("/my-store/reconcile-payments", response_model=MyStoreResponse, status_code=status.HTTP_200_OK)
+def reconcile_my_store_payments(
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Rekonsiliasi eksplisit kampanye menunggu pembayaran milik pengguna dengan Xendit
+    (pengganti efek samping GET /ads/my-store). Satu panggilan Xendit per kampanye PENDING.
+    """
+    if not xendit_service.is_xendit_sandbox_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Payment gateway Xendit belum dikonfigurasi."
+        )
+
+    pending = (
+        db.query(AdCampaign)
+        .filter(
+            AdCampaign.owner_user_id == user_id,
+            or_(AdCampaign.status == "pending_payment", AdCampaign.payment_status == "unpaid"),
+        )
+        .all()
+    )
+    for c in pending:
+        tx = (
+            db.query(PaymentTransaction)
+            .filter(PaymentTransaction.campaign_id == c.id)
+            .order_by(PaymentTransaction.created_at.desc())
+            .first()
+        )
+        if tx and tx.status == "PENDING":
+            _reconcile_transaction_with_xendit(tx, c, db)
+
+    return get_my_store(user_id=user_id, db=db)
 
 
 @router.post("/claim-store", response_model=MyStoreResponse, status_code=status.HTTP_200_OK)
@@ -1970,6 +1993,28 @@ async def xendit_webhook(
     return {"status": "ignored", "message": f"Event status {event_status} ignored"}
 
 
+def _payment_status_response(campaign: AdCampaign, db: Session) -> PaymentStatusResponse:
+    tx = (
+        db.query(PaymentTransaction)
+        .filter(PaymentTransaction.campaign_id == campaign.id)
+        .order_by(PaymentTransaction.created_at.desc())
+        .first()
+    )
+    return PaymentStatusResponse(
+        campaign_id=str(campaign.id),
+        campaign_status=campaign.status,
+        payment_status=campaign.payment_status,
+        transaction_status=tx.status if tx else None,
+        external_id=tx.external_id if tx else campaign.payment_ref,
+        xendit_invoice_id=tx.xendit_invoice_id if tx else None,
+        invoice_url=tx.invoice_url if tx else None,
+        amount=int(tx.amount) if tx else campaign.price_paid,
+        currency=tx.currency if tx else "IDR",
+        paid_at=tx.paid_at.isoformat() if tx and tx.paid_at else None,
+        expires_at=campaign.expires_at.isoformat() if campaign.expires_at else None,
+    )
+
+
 @router.get("/campaigns/{campaign_id}/payment-status", response_model=PaymentStatusResponse, status_code=status.HTTP_200_OK)
 def get_campaign_payment_status(
     campaign_id: str,
@@ -1977,7 +2022,8 @@ def get_campaign_payment_status(
     db: Session = Depends(get_db)
 ):
     """
-    Mengambil status pembayaran dan transaksi kampanye iklan terkini.
+    Mengambil status pembayaran dan transaksi kampanye iklan terkini (hanya membaca DB).
+    Untuk menyinkronkan dengan Xendit gunakan POST /campaigns/{id}/reconcile-payment.
     Hanya dapat diakses oleh pemilik kampanye yang sah.
     """
     campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
@@ -1993,30 +2039,48 @@ def get_campaign_payment_status(
             detail="Anda tidak memiliki izin untuk melihat status pembayaran kampanye ini."
         )
 
+    return _payment_status_response(campaign, db)
+
+
+@router.post("/campaigns/{campaign_id}/reconcile-payment", response_model=PaymentStatusResponse, status_code=status.HTTP_200_OK)
+def reconcile_campaign_payment(
+    campaign_id: str,
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Rekonsiliasi eksplisit transaksi PENDING dengan Xendit (fallback bila webhook terlambat atau hilang).
+    Hanya pemilik kampanye. Menulis status PAID/EXPIRED/FAILED sesuai laporan Xendit.
+    """
+    campaign = db.query(AdCampaign).filter(AdCampaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kampanye iklan tidak ditemukan."
+        )
+
+    if str(campaign.owner_user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Anda tidak memiliki izin untuk melihat status pembayaran kampanye ini."
+        )
+
+    if not xendit_service.is_xendit_sandbox_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Payment gateway Xendit belum dikonfigurasi."
+        )
+
     tx = (
         db.query(PaymentTransaction)
         .filter(PaymentTransaction.campaign_id == campaign.id)
         .order_by(PaymentTransaction.created_at.desc())
         .first()
     )
-
-    # Reconcile pending transaction with Xendit API as fallback for missed/delayed webhooks
-    if tx and tx.status == "PENDING" and xendit_service.is_xendit_sandbox_configured():
+    if tx and tx.status == "PENDING":
         _reconcile_transaction_with_xendit(tx, campaign, db)
 
-    return PaymentStatusResponse(
-        campaign_id=str(campaign.id),
-        campaign_status=campaign.status,
-        payment_status=campaign.payment_status,
-        transaction_status=tx.status if tx else None,
-        external_id=tx.external_id if tx else campaign.payment_ref,
-        xendit_invoice_id=tx.xendit_invoice_id if tx else None,
-        invoice_url=tx.invoice_url if tx else None,
-        amount=int(tx.amount) if tx else campaign.price_paid,
-        currency=tx.currency if tx else "IDR",
-        paid_at=tx.paid_at.isoformat() if tx and tx.paid_at else None,
-        expires_at=campaign.expires_at.isoformat() if campaign.expires_at else None,
-    )
+    return _payment_status_response(campaign, db)
 
 
 def _ensure_seed_campaigns(db: Session):

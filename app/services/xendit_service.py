@@ -31,6 +31,10 @@ def get_xendit_config() -> Dict[str, Any]:
     if not secret_key:
         raise XenditConfigError("XENDIT_SECRET_KEY is required but not configured.")
 
+    # Tanpa token, invoice bisa dibuat tetapi semua callback Xendit ditolak 401 (gagal diam-diam).
+    if not webhook_token:
+        raise XenditConfigError("XENDIT_WEBHOOK_TOKEN is required but not configured.")
+
     # Strictly reject non-sandbox environments in this stage
     if environment != "sandbox":
         raise XenditConfigError(f"Xendit environment must be 'sandbox', got: {environment}")
