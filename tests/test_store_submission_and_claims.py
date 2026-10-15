@@ -299,54 +299,6 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self.assertEqual(my_store_u2["claim_status"], "rejected")
         self.assertEqual(my_store_u2["rejection_reason"], "Foto papan nama toko buram dan NIB tidak terdaftar.")
 
-    def test_document_security_and_access_control(self):
-        """Uji upload dan pembatasan akses dokumen privat."""
-        self._login_as(self.user1_id)
-
-        # 1. Tolak format berbahaya (.sh / script)
-        bad_file = ("script.sh", b"echo 'hacked'", "application/x-sh")
-        res_bad = self.client.post(
-            "/ads/upload-claim-document",
-            files={"file": bad_file}
-        )
-        self.assertEqual(res_bad.status_code, 400)
-        self.assertIn("Format file tidak valid", res_bad.json()["detail"])
-
-        # 2. Terima PDF valid (magic bytes %PDF)
-        pdf_bytes = b"%PDF-1.4 simulated pdf document content for business permit"
-        good_file = ("legalitas.pdf", pdf_bytes, "application/pdf")
-        res_pdf = self.client.post(
-            "/ads/upload-claim-document",
-            files={"file": good_file}
-        )
-        self.assertEqual(res_pdf.status_code, 200)
-        doc_url = res_pdf.json()["document_url"]
-        filename = res_pdf.json()["filename"]
-
-        # Hubungkan dokumen ke pengajuan user 1
-        self.client.post("/ads/claim-store", json={
-            "store_id": str(self.store1.id),
-            "applicant_name": "Budi",
-            "document_url": doc_url
-        })
-
-        # 3. User 1 (pemilik dokumen) dapat mengunduh dokumen
-        res_download_owner = self.client.get(f"/ads/documents/{filename}")
-        self.assertEqual(res_download_owner.status_code, 200)
-        self.assertEqual(res_download_owner.content, pdf_bytes)
-
-        # 4. User 2 (bukan pemilik dokumen) ditolak 403 Forbidden
-        self._login_as(self.user2_id)
-        res_download_other = self.client.get(f"/ads/documents/{filename}")
-        self.assertEqual(res_download_other.status_code, 403)
-        self.assertIn("Akses ditolak", res_download_other.json()["detail"])
-
-        # 5. Admin dapat mengunduh dokumen untuk verifikasi
-        self._login_as(self.admin_id, role="admin")
-        res_download_admin = self.client.get(f"/ads/documents/{filename}")
-        self.assertEqual(res_download_admin.status_code, 200)
-        self.assertEqual(res_download_admin.content, pdf_bytes)
-
     def test_submit_new_store_returns_503_when_table_not_available(self):
         """Submit New Store mengembalikan HTTP 503 jika tabel store_submissions belum tersedia di database."""
         from unittest.mock import patch

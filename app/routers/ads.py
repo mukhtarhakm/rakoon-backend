@@ -5,10 +5,8 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status, UploadFile, File
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
@@ -19,14 +17,19 @@ from app.dependencies import get_current_user, get_current_admin_user, get_curre
 from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, User, StoreSubmission
 from app.services import xendit_service
 from app.routers.stores import haversine_distance
-from app.services.storage_upload import read_upload, detect_content_type, upload_image
+from app.services.storage_upload import (
+    CLAIM_PATH_RE,
+    CLAIM_SIGNED_URL_TTL_SECONDS,
+    create_claim_signed_url,
+    detect_claim_evidence_type,
+    read_upload,
+    store_private,
+    upload_image,
+)
 
 logger = logging.getLogger("rakoon_backend.ads")
 
 router = APIRouter()
-
-PRIVATE_DOCS_DIR = Path(__file__).resolve().parent.parent.parent / "private_storage" / "documents"
-PRIVATE_DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
 def _has_store_submissions_table(db: Session) -> bool:
     try:
@@ -1370,19 +1373,13 @@ async def upload_claim_document(
     user_id: str = Depends(get_current_user),
 ):
     """
-    Mengunggah dokumen legalitas usaha (NIB, dsb) secara aman ke private storage.
-    Hanya menerima berkas PDF atau gambar scan (JPEG, PNG, WebP) maks 5MB; tipe dicek dari isi berkas.
-    Lokasi simpan (private_storage) dan awalan nama doc_{user_id}_ dipertahankan sampai gelombang d.
+    Mengunggah dokumen legalitas usaha (NIB, dsb) ke bucket privat `claim-document`.
+    Hanya PDF atau JPEG (magic bytes), maks 5MB. Mengembalikan path objek acak (tanpa user_id);
+    path itulah yang dikirim kembali pada klaim/pengajuan. Storage gagal -> 503.
     """
     contents = await read_upload(file)
-    content_type, ext = detect_content_type(contents, allow_pdf=True)
-
-    filename = f"doc_{user_id}_{uuid.uuid4().hex[:16]}{ext}"
-    target_path = PRIVATE_DOCS_DIR / filename
-    with open(target_path, "wb") as f:
-        f.write(contents)
-
-    return {"document_url": f"/ads/documents/{filename}", "filename": filename}
+    content_type, ext = detect_claim_evidence_type(contents, "documents")
+    return {"document_path": store_private(contents, content_type, ext, "documents", user_id)}
 
 
 @router.post("/upload-claim-photo", status_code=status.HTTP_200_OK)
@@ -1391,80 +1388,57 @@ async def upload_claim_photo(
     user_id: str = Depends(get_current_user),
 ):
     """
-    Mengunggah foto tampak depan toko yang memperlihatkan papan nama toko.
-    Storage gagal -> 502/503 (tidak ada URL pengganti).
+    Mengunggah foto tampak depan toko (papan nama terlihat) ke bucket privat `claim-document`.
+    Hanya JPEG (magic bytes), maks 5MB. Storage gagal -> 503 (tidak ada URL pengganti).
     """
-    return {"photo_url": await upload_image(file, prefix="claim_photo_")}
+    contents = await read_upload(file)
+    content_type, ext = detect_claim_evidence_type(contents, "photos")
+    return {"photo_path": store_private(contents, content_type, ext, "photos", user_id)}
 
 
 @router.get("/documents/{filename}")
 def get_private_document(
     filename: str,
     user_id: str = Depends(get_current_user),
-    profile: dict = Depends(get_current_user_profile),
-    db: Session = Depends(get_db)
 ):
     """
-    Mengunduh dokumen legalitas dari private storage secara aman.
-    Akses hanya diizinkan untuk admin atau pemohon pemilik dokumen tersebut.
+    Dinonaktifkan: dokumen kini ada di bucket privat dan dibuka admin lewat GET /ads/claim-evidence-url.
+    Login tetap wajib dan jawabannya sama untuk nama berkas apa pun (tidak membocorkan keberadaan berkas).
     """
-    safe_filename = Path(filename).name
-    if safe_filename != filename:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nama berkas tidak valid.")
-
-    file_path = PRIVATE_DOCS_DIR / safe_filename
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dokumen tidak ditemukan.")
-
-    # Cek hak akses: Admin selalu diizinkan
-    is_admin = profile.get("role") == "admin"
-    if not is_admin:
-        allowed = False
-        # 1. Dokumen yang diunggah oleh user ini sendiri
-        if safe_filename.startswith(f"doc_{user_id}_"):
-            allowed = True
-
-        # 2. Cek klaim toko user jika kolom document_url tersedia
-        if not allowed:
-            user_owners = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).all()
-            for o in user_owners:
-                if safe_filename in (getattr(o, "document_url", None) or ""):
-                    allowed = True
-                    break
-
-        # 3. Cek pengajuan toko baru user dari DB
-        if not allowed and _has_store_submissions_table(db):
-            try:
-                sub = (
-                    db.query(StoreSubmission)
-                    .filter(
-                        StoreSubmission.user_id == user_id,
-                        StoreSubmission.document_url.like(f"%{safe_filename}%")
-                    )
-                    .first()
-                )
-                if sub:
-                    allowed = True
-            except Exception:
-                pass
-
-        if not allowed:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Akses ditolak: Anda tidak memiliki izin untuk melihat dokumen ini."
-            )
-
-    media_type = "application/pdf" if safe_filename.endswith(".pdf") else "image/jpeg"
-    if safe_filename.endswith(".png"):
-        media_type = "image/png"
-    elif safe_filename.endswith(".webp"):
-        media_type = "image/webp"
-
-    return FileResponse(
-        path=file_path,
-        media_type=media_type,
-        headers={"Cache-Control": "private, no-store"}
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Endpoint ini sudah tidak digunakan. Admin membuka bukti lewat tautan bertanda tangan.",
     )
+
+
+@router.get("/claim-evidence-url", status_code=status.HTTP_200_OK)
+def get_claim_evidence_url(
+    response: Response,
+    path: str = Query(..., description="Path objek bukti klaim di bucket privat"),
+    admin_user: dict = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Admin: signed URL berumur pendek untuk bukti yang benar-benar dipakai pada sebuah klaim/pengajuan."""
+    if not CLAIM_PATH_RE.match(path):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Path bukti tidak valid.")
+
+    referenced = (
+        db.query(StoreOwner.id)
+        .filter(or_(StoreOwner.document_url == path, StoreOwner.store_photo_url == path))
+        .first()
+    )
+    if not referenced and _has_store_submissions_table(db):
+        referenced = (
+            db.query(StoreSubmission.id)
+            .filter(or_(StoreSubmission.document_url == path, StoreSubmission.store_photo_url == path))
+            .first()
+        )
+    if not referenced:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bukti tidak ditemukan.")
+
+    url = create_claim_signed_url(path, CLAIM_SIGNED_URL_TTL_SECONDS)
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"url": url, "expires_in": CLAIM_SIGNED_URL_TTL_SECONDS}
 
 
 @router.post("/upload-banner", status_code=status.HTTP_200_OK)
