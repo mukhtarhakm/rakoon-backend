@@ -189,7 +189,7 @@ class TestMyStoreRespectsClaimStatus(Base_):
         self._paid_campaign()
         self.claim()
         self.login(ADMIN, admin=True)
-        self.client.post("/ads/reject-claim", json={"user_id": USER, "store_id": str(self.store_a.id), "reason": "x"})
+        self.client.post("/ads/reject-claim", json={"user_id": USER, "store_id": str(self.store_a.id), "reason": "Alasan uji"})
         self.login(USER)
         res = self.client.get("/ads/my-store").json()
         self.assertEqual(res["claim_status"], "rejected")

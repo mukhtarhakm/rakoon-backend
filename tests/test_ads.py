@@ -149,7 +149,7 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(claims[0]["store_nama"], self.store.nama)
 
         # 4. Reject non-existent claim returns 404
-        self.assertEqual(self.client.post("/ads/reject-claim", json={"user_id": "non-existent", "store_id": str(self.store.id)}).status_code, 404)
+        self.assertEqual(self.client.post("/ads/reject-claim", json={"user_id": "non-existent", "store_id": str(self.store.id), "reason": "Alasan uji"}).status_code, 404)
         self.assertEqual(self.client.post("/ads/verify-claim", json={"user_id": "non-existent", "store_id": str(self.store.id)}).status_code, 404)
 
         # 5. Admin rejects claim
@@ -162,7 +162,7 @@ class TestAdsModule(unittest.TestCase):
         # 5a. Rejected claim cannot be verified directly or rejected again
         verify_rejected = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
         self.assertEqual(verify_rejected.status_code, 400)
-        reject_again = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        reject_again = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id), "reason": "Alasan uji"})
         self.assertEqual(reject_again.status_code, 400)
 
         # 6. Rejected claim is removed from pending claims
@@ -189,7 +189,7 @@ class TestAdsModule(unittest.TestCase):
         self.assertIsNone(verify_res.json()["rejection_reason"])
 
         # 9. Already verified claim cannot be rejected or re-verified
-        reject_verified = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
+        reject_verified = self.client.post("/ads/reject-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id), "reason": "Alasan uji"})
         self.assertEqual(reject_verified.status_code, 400)
         verify_again = self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)})
         self.assertEqual(verify_again.status_code, 400)
@@ -223,7 +223,7 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(verify_conflict.status_code, 409)
 
         # 5. Admin can reject other_claim cleanly
-        reject_res = self.client.post("/ads/reject-claim", json={"user_id": OTHER_USER_ID, "store_id": str(self.store.id)})
+        reject_res = self.client.post("/ads/reject-claim", json={"user_id": OTHER_USER_ID, "store_id": str(self.store.id), "reason": "Alasan uji"})
         self.assertEqual(reject_res.status_code, 200)
         self.assertEqual(self.client.get("/ads/pending-claims").json(), [])
 

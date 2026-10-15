@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
@@ -207,10 +207,20 @@ class VerifyStoreClaimRequest(BaseModel):
     store_id: str = Field(..., description="ID toko yang diklaim")
 
 
+def _clean_rejection_reason(value: str) -> str:
+    """Alasan penolakan wajib: 3..500 karakter setelah trim; yang disimpan sudah di-trim."""
+    value = value.strip()
+    if not 3 <= len(value) <= 500:
+        raise ValueError("alasan penolakan harus 3 sampai 500 karakter")
+    return value
+
+
 class RejectStoreClaimRequest(BaseModel):
     user_id: str = Field(..., description="ID pengguna yang mengajukan klaim")
     store_id: str = Field(..., description="ID toko yang diklaim")
-    reason: Optional[str] = Field(None, description="Alasan penolakan klaim opsional")
+    reason: str = Field(..., description="Alasan penolakan klaim (wajib, 3-500 karakter)")
+
+    _check_reason = field_validator("reason")(_clean_rejection_reason)
 
 
 class VerifyNewStoreRequest(BaseModel):
@@ -227,7 +237,9 @@ class VerifyNewStoreRequest(BaseModel):
 
 class RejectNewStoreRequest(BaseModel):
     submission_id: str = Field(..., description="ID pengajuan toko baru")
-    reason: Optional[str] = Field(None, description="Alasan penolakan pengajuan")
+    reason: str = Field(..., description="Alasan penolakan pengajuan (wajib, 3-500 karakter)")
+
+    _check_reason = field_validator("reason")(_clean_rejection_reason)
 
 
 class UserSubmissionItem(BaseModel):
@@ -958,7 +970,7 @@ def reject_store_claim(
                 detail="Klaim toko sudah dalam status ditolak."
             )
 
-        clean_reason = payload.reason.strip() if payload.reason and payload.reason.strip() else None
+        clean_reason = payload.reason
 
         owner.status = "rejected"
         owner.verified_at = None
@@ -1404,7 +1416,7 @@ def reject_new_store_submission(
             detail="Fitur penolakan toko baru belum tersedia karena skema database belum diperbarui."
         )
     try:
-        clean_reason = payload.reason.strip() if payload.reason and payload.reason.strip() else None
+        clean_reason = payload.reason
         now = datetime.now(timezone.utc)
         sub = db.query(StoreSubmission).filter(StoreSubmission.id == payload.submission_id).with_for_update().first()
         if not sub:
