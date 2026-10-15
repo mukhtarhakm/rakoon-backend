@@ -474,12 +474,11 @@ def _reconcile_transaction_with_xendit(
 def _is_demo_mode_allowed() -> bool:
     """
     Mode demo HANYA diizinkan jika secara eksplisit diaktifkan melalui konfigurasi server
-    (environment variable ALLOW_DEMO_ADS='true' dan bukan environment production).
+    (environment variable ALLOW_DEMO_ADS='true') dan RAKOON_ENV maupun ENVIRONMENT bukan production.
     Parameter request publik (include_demo) TIDAK BISA mengaktifkan mode demo
     jika konfigurasi server tidak mengizinkannya atau pada environment production.
     """
-    app_env = os.getenv("ENVIRONMENT", "development").lower()
-    if app_env == "production":
+    if "production" in (os.getenv("RAKOON_ENV", "").strip().lower(), os.getenv("ENVIRONMENT", "").strip().lower()):
         return False
     return os.getenv("ALLOW_DEMO_ADS", "false").lower() == "true"
 
@@ -2313,88 +2312,3 @@ def reconcile_campaign_payment(
         _reconcile_transaction_with_xendit(tx, campaign, db)
 
     return _payment_status_response(campaign, db)
-
-
-def _ensure_seed_campaigns(db: Session):
-    """
-    Inisialisasi sampel banner flyer promo untuk toko terkenal di Yogyakarta jika belum ada data iklan demo di development.
-    """
-    # ponytail: demo seeds only execute in non-production when ALLOW_DEMO_ADS=true
-    if not _is_demo_mode_allowed():
-        return
-
-    # Cari toko-toko di Jogja yang sudah ada
-    stores = db.query(Store).limit(5).all()
-    if not stores:
-        default_store = Store(
-            id=str(uuid.uuid4()),
-            nama="Pamela 6 Supermarket",
-            alamat="Jl. Raya Condongcatur No. 12, Sleman, Yogyakarta",
-            lat=-7.7589,
-            lng=110.4011,
-        )
-        db.add(default_store)
-        db.flush()
-        stores = [default_store]
-
-    now = datetime.now(timezone.utc)
-    sample_ads = [
-        {
-            "title": "Promo JSM Minyak Goreng & Beras Super Hemat",
-            "banner_url": "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80",
-            "duration": 7,
-            "price": 30000,
-        },
-        {
-            "title": "Diskon Spesial Susu Segar & Kebutuhan Dapur",
-            "banner_url": "https://images.unsplash.com/photo-1578916171728-46686eac8d58?auto=format&fit=crop&w=800&q=80",
-            "duration": 3,
-            "price": 15000,
-        },
-        {
-            "title": "Belanja Hemat Akhir Pekan - Aneka Snack & Minuman",
-            "banner_url": "https://images.unsplash.com/photo-1588964895597-cfccd6e2dbf9?auto=format&fit=crop&w=800&q=80",
-            "duration": 14,
-            "price": 50000,
-        }
-    ]
-
-    for i, ad_data in enumerate(sample_ads):
-        existing = (
-            db.query(AdCampaign)
-            .filter(
-                AdCampaign.owner_user_id == "00000000-0000-0000-0000-000000000000",
-                AdCampaign.payment_status == "demo",
-                AdCampaign.title == ad_data["title"],
-            )
-            .first()
-        )
-        if existing:
-            # Pastikan masa berlaku kampanye demo tetap aktif untuk development
-            if _ensure_utc(existing.expires_at) <= now or existing.status != "active":
-                existing.status = "active"
-                existing.expires_at = now + timedelta(days=ad_data["duration"])
-            continue
-
-        store = stores[i % len(stores)]
-        expires = now + timedelta(days=ad_data["duration"])
-        campaign = AdCampaign(
-            store_id=store.id,
-            owner_user_id="00000000-0000-0000-0000-000000000000",
-            title=ad_data["title"],
-            banner_url=ad_data["banner_url"],
-            duration_days=ad_data["duration"],
-            price_paid=ad_data["price"],
-            status="active",
-            payment_status="demo",
-            payment_method="DEMO",
-            start_at=now,
-            expires_at=expires,
-        )
-        db.add(campaign)
-
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        logger.warning(f"Failed to auto-seed ad campaigns: {e}")
