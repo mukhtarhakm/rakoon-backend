@@ -1,3 +1,5 @@
+Salinan usang; acuan: PRD_Rakoon.md di root
+
 # Product Requirements Document (PRD)
 ## Rakoon — AI Computer Vision untuk Belanja Cerdas di Supermarket
 
