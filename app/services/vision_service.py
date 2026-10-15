@@ -194,38 +194,6 @@ def parse_raw_items(raw_items: Any) -> List[ScanResultItem]:
     return processed
 
 
-def check_needs_escalation(items: List[ScanResultItem]) -> Tuple[bool, str]:
-    """
-    Evaluasi kelengkapan hasil deteksi dari model gpt-5.6-luna.
-    Kembalikan (True, alasan) jika ada indikasi ketidakpastian atau informasi penting
-    yang tidak terbaca dengan jelas sehingga perlu verifikasi manual oleh user.
-    Jika hasil Luna jelas, lengkap, dan yakin, kembalikan (False, "").
-    """
-    if not items:
-        return True, "Tidak ada produk yang terdeteksi pada hasil scan"
-
-    for idx, item in enumerate(items):
-        item_label = item.nama_produk or f"Produk #{idx + 1}"
-
-        # 1. Indikasi ketidakpastian
-        if item.confidence.lower() == "rendah":
-            return True, f"Item '{item_label}' memiliki confidence rendah"
-
-        # 2. Informasi penting tidak terbaca jelas: nama produk kosong/null
-        if not item.nama_produk or not item.nama_produk.strip():
-            return True, f"Nama produk untuk item #{idx + 1} tidak terbaca dengan jelas"
-
-        # 3. Informasi penting tidak terbaca jelas: harga kosong/null/<= 0
-        if item.harga is None or item.harga <= 0:
-            return True, f"Harga produk untuk item '{item_label}' tidak terbaca dengan jelas (null)"
-
-        # 4. needs_verification aktif
-        if item.needs_verification:
-            return True, f"Item '{item_label}' memiliki atribut yang perlu verifikasi lanjutan"
-
-    return False, ""
-
-
 async def send_vision_request(
     client: httpx.AsyncClient,
     base_url: str,

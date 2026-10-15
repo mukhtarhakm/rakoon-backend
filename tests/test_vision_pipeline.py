@@ -9,7 +9,6 @@ from app.dependencies import get_current_user
 from app.models.schemas import ScanResultItem, ProductCategory, ScanResponse
 from app.services.vision_service import (
     process_shelf_image,
-    check_needs_escalation,
     clean_numeric,
     clean_str,
     normalize_and_validate_category,
@@ -233,76 +232,6 @@ class TestVisionPipeline(unittest.IsolatedAsyncioTestCase):
 
 
 class TestVisionHelpers(unittest.TestCase):
-
-    def test_check_needs_escalation_rules(self):
-        # 1. High confidence & complete data -> No escalation
-        items_good = [
-            ScanResultItem(
-                nama_produk="Kecap Manis Bango 520ml",
-                harga=25000,
-                ukuran=520,
-                satuan="ml",
-                kategori=ProductCategory.BUMBU_SAUS,
-                confidence="tinggi",
-                needs_verification=False
-            )
-        ]
-        needs_esc, reason = check_needs_escalation(items_good)
-        self.assertFalse(needs_esc)
-        self.assertEqual(reason, "")
-
-        # 2. Low confidence -> Needs escalation
-        items_low_conf = [
-            ScanResultItem(
-                nama_produk="Kecap Manis Bango",
-                harga=25000,
-                ukuran=520,
-                satuan="ml",
-                kategori=ProductCategory.BUMBU_SAUS,
-                confidence="rendah",
-                needs_verification=True
-            )
-        ]
-        needs_esc, reason = check_needs_escalation(items_low_conf)
-        self.assertTrue(needs_esc)
-        self.assertIn("confidence rendah", reason)
-
-        # 3. Missing price -> Needs escalation
-        items_missing_price = [
-            ScanResultItem(
-                nama_produk="Minyak Goreng Bimoli 2L",
-                harga=None,
-                ukuran=2,
-                satuan="L",
-                kategori=ProductCategory.MAKANAN_POKOK,
-                confidence="tinggi",
-                needs_verification=True
-            )
-        ]
-        needs_esc, reason = check_needs_escalation(items_missing_price)
-        self.assertTrue(needs_esc)
-        self.assertIn("Harga produk", reason)
-
-        # 4. Missing name -> Needs escalation
-        items_missing_name = [
-            ScanResultItem(
-                nama_produk=None,
-                harga=10000,
-                ukuran=100,
-                satuan="g",
-                kategori=ProductCategory.CAMILAN,
-                confidence="tinggi",
-                needs_verification=True
-            )
-        ]
-        needs_esc, reason = check_needs_escalation(items_missing_name)
-        self.assertTrue(needs_esc)
-        self.assertIn("Nama produk", reason)
-
-        # 5. Empty items -> Needs escalation
-        needs_esc, reason = check_needs_escalation([])
-        self.assertTrue(needs_esc)
-        self.assertIn("Tidak ada produk", reason)
 
     def test_clean_helpers(self):
         self.assertEqual(clean_numeric("Rp 25.000"), 25000.0)
