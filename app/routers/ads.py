@@ -1453,7 +1453,7 @@ async def upload_claim_photo(
 ):
     """
     Mengunggah foto tampak depan toko (papan nama terlihat) ke bucket privat `claim-document`.
-    Hanya JPEG (magic bytes), maks 5MB. Storage gagal -> 503 (tidak ada URL pengganti).
+    Hanya JPEG atau PNG (magic bytes), maks 5MB. Storage gagal -> 503 (tidak ada URL pengganti).
     """
     contents = await read_upload(file)
     content_type, ext = detect_claim_evidence_type(contents, "photos")

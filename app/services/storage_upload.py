@@ -90,7 +90,8 @@ async def upload_image(file: UploadFile, prefix: str = "") -> str:
 # ---- Bukti klaim (dokumen legalitas + foto toko): bucket PRIVAT, hanya PDF/JPEG ----
 CLAIM_BUCKET = "claim-document"
 CLAIM_SIGNED_URL_TTL_SECONDS = 300
-CLAIM_PATH_RE = re.compile(r"^(documents|photos)/([0-9a-f]{32})([0-9a-f]{16})\.(pdf|jpg)$")
+CLAIM_PATH_RE = re.compile(r"^(documents|photos)/([0-9a-f]{32})([0-9a-f]{16})\.(pdf|jpg|png)$")
+_CLAIM_EXTENSIONS = {"documents": {"pdf", "jpg"}, "photos": {"jpg", "png"}}
 
 
 def _claim_mac_key() -> Optional[bytes]:
@@ -105,12 +106,14 @@ def _claim_mac(key: bytes, kind: str, user_id: str, token: str) -> str:
 
 
 def detect_claim_evidence_type(contents: bytes, kind: str) -> Tuple[str, str]:
-    """Bukti klaim hanya PDF (dokumen) atau JPEG (dokumen/foto); dicek dari magic bytes."""
+    """Dokumen: PDF atau JPEG. Foto toko: JPEG atau PNG. Dicek dari magic bytes."""
     if contents.startswith(b"\xff\xd8\xff"):
         return "image/jpeg", ".jpg"
     if kind == "documents" and contents.startswith(b"%PDF"):
         return "application/pdf", ".pdf"
-    allowed = "PDF atau JPEG" if kind == "documents" else "JPEG"
+    if kind == "photos" and contents.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    allowed = "PDF atau JPEG" if kind == "documents" else "JPEG atau PNG"
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"Format file tidak valid. Gunakan {allowed}.",
@@ -155,7 +158,7 @@ def claim_path_belongs_to(path: object, user_id: str, kind: str) -> bool:
     """True bila path berbentuk benar, berjenis `kind`, dan dibuat untuk user_id ini."""
     key = _claim_mac_key()
     match = CLAIM_PATH_RE.match(path) if isinstance(path, str) else None
-    if key is None or not match or match.group(1) != kind:
+    if key is None or not match or match.group(1) != kind or match.group(4) not in _CLAIM_EXTENSIONS.get(kind, ()):
         return False
     return hmac.compare_digest(match.group(3), _claim_mac(key, kind, str(user_id), match.group(2)))
 

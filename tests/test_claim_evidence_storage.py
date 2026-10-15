@@ -42,7 +42,7 @@ JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"fake jpeg body"
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake png body"
 WEBP = b"RIFF\x00\x00\x00\x00WEBP" + b"fake webp body"
 DOC_PATH_RE = r"^documents/[0-9a-f]{48}\.(pdf|jpg)$"
-PHOTO_PATH_RE = r"^photos/[0-9a-f]{48}\.jpg$"
+PHOTO_PATH_RE = r"^photos/[0-9a-f]{48}\.(jpg|png)$"
 
 
 class ClaimEvidenceBase(unittest.TestCase):
@@ -114,16 +114,36 @@ class TestUploadToPrivateBucket(ClaimEvidenceBase):
         self.assertEqual(res.status_code, 413)
         self.bucket.upload.assert_not_called()
 
-    def test_photo_accepts_jpeg_only(self):
-        ok = self._post("/ads/upload-claim-photo", JPEG, "front.jpg", "image/jpeg")
-        self.assertEqual(ok.status_code, 200)
-        self.assertRegex(ok.json()["photo_path"], PHOTO_PATH_RE)
-        self.sb.storage.from_.assert_called_with("claim-document")
+    def test_photo_accepts_jpeg_and_real_png(self):
+        for content, name, ctype, ext in ((JPEG, "front.jpg", "image/jpeg", "jpg"), (PNG, "front.png", "image/png", "png")):
+            ok = self._post("/ads/upload-claim-photo", content, name, ctype)
+            self.assertEqual(ok.status_code, 200, name)
+            path = ok.json()["photo_path"]
+            self.assertRegex(path, PHOTO_PATH_RE)
+            self.assertTrue(path.endswith("." + ext))
+            self.assertEqual(self.bucket.upload.call_args[0][2]["content-type"], ctype)
+            self.sb.storage.from_.assert_called_with("claim-document")
+            self.assertTrue(storage_upload.claim_path_belongs_to(path, USER_ID, "photos"))
 
-        self.bucket.upload.reset_mock()
-        for content, name, ctype in ((PNG, "a.png", "image/png"), (PDF, "a.pdf", "application/pdf"), (WEBP, "a.webp", "image/webp")):
+    def test_photo_rejects_pdf_webp_and_fake_png(self):
+        for content, name, ctype in (
+            (PDF, "a.pdf", "application/pdf"),
+            (WEBP, "a.webp", "image/webp"),
+            (b"<script>alert(1)</script>", "fake.png", "image/png"),
+        ):
             self.assertEqual(self._post("/ads/upload-claim-photo", content, name, ctype).status_code, 400, name)
         self.bucket.upload.assert_not_called()
+
+    def test_document_still_rejects_png_and_fake_png(self):
+        for content, name in ((PNG, "a.png"), (b"not a png at all", "fake.png"), (WEBP, "a.webp")):
+            self.assertEqual(self._post("/ads/upload-claim-document", content, name, "image/png").status_code, 400, name)
+        self.bucket.upload.assert_not_called()
+
+    def test_png_photo_path_is_not_valid_as_a_document_path(self):
+        photo = self._post("/ads/upload-claim-photo", PNG, "a.png").json()["photo_path"]
+        self.assertFalse(storage_upload.claim_path_belongs_to(photo, USER_ID, "documents"))
+        forged = "documents/" + photo.split("/", 1)[1]
+        self.assertFalse(storage_upload.claim_path_belongs_to(forged, USER_ID, "documents"))
 
     def test_each_upload_gets_a_different_path(self):
         a = self._post("/ads/upload-claim-document", PDF, "a.pdf").json()["document_path"]
