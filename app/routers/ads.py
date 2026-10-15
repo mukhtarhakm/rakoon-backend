@@ -19,6 +19,7 @@ from app.services import xendit_service
 from app.routers.stores import haversine_distance
 from app.services.storage_upload import (
     CLAIM_PATH_RE,
+    claim_path_belongs_to,
     CLAIM_SIGNED_URL_TTL_SECONDS,
     create_claim_signed_url,
     detect_claim_evidence_type,
@@ -157,13 +158,13 @@ class RenewCampaignRequest(BaseModel):
 
 class ClaimStoreRequest(BaseModel):
     store_id: str = Field(..., description="ID toko yang ingin diklaim/dikelola")
-    applicant_name: Optional[str] = Field(None, description="Nama lengkap pemohon")
-    applicant_phone: Optional[str] = Field(None, description="Nomor kontak yang dapat diverifikasi")
+    applicant_name: str = Field(..., min_length=2, description="Nama lengkap pemohon")
+    applicant_phone: str = Field(..., min_length=8, description="Nomor kontak yang dapat diverifikasi")
     applicant_role: Optional[str] = Field(None, description="Peran pemohon (Pemilik, Pengurus Perusahaan, Manajer Cabang)")
-    document_url: Optional[str] = Field(None, description="URL/Path dokumen legalitas usaha (NIB)")
-    store_photo_url: Optional[str] = Field(None, description="URL/Path foto tampak depan toko")
+    document_url: str = Field(..., min_length=1, description="Path dokumen legalitas dari POST /ads/upload-claim-document (document_path)")
+    store_photo_url: str = Field(..., min_length=1, description="Path foto toko dari POST /ads/upload-claim-photo (photo_path)")
 
-    model_config = {"extra": "ignore"}
+    model_config = {"extra": "ignore", "str_strip_whitespace": True}
 
 
 class SubmitNewStoreRequest(BaseModel):
@@ -577,6 +578,36 @@ def get_home_banners(
     return banner_items
 
 
+def _require_own_evidence(user_id: str, document_path: Optional[str], photo_path: Optional[str]) -> None:
+    """Bukti klaim wajib berupa path hasil unggahan pemanggil sendiri (MAC), bukan URL/nama berkas bebas."""
+    if document_path is not None and not claim_path_belongs_to(document_path, user_id, "documents"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dokumen bukti tidak valid. Unggah ulang dokumen Anda.")
+    if photo_path is not None and not claim_path_belongs_to(photo_path, user_id, "photos"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Foto toko tidak valid. Unggah ulang foto Anda.")
+
+
+def _is_verified_owner(owner: StoreOwner) -> bool:
+    return owner.status == "verified" and owner.verified_at is not None
+
+
+def _claim_rows(db: Session, user_id: str, store_id: Optional[str] = None, lock: bool = False) -> List[StoreOwner]:
+    """Semua baris klaim milik pengguna (opsional per toko), terbaru dulu."""
+    query = db.query(StoreOwner).filter(StoreOwner.user_id == user_id)
+    if store_id is not None:
+        query = query.filter(StoreOwner.store_id == store_id)
+    query = query.order_by(StoreOwner.created_at.desc())
+    return (query.with_for_update() if lock else query).all()
+
+
+def _pick_claim(rows: List[StoreOwner]) -> Optional[StoreOwner]:
+    """Klaim yang relevan: terverifikasi, lalu pending terbaru, lalu ditolak terbaru."""
+    for wanted in (_is_verified_owner, lambda o: o.status == "pending", lambda o: True):
+        for row in rows:
+            if wanted(row):
+                return row
+    return None
+
+
 @router.get("/my-store", response_model=MyStoreResponse, status_code=status.HTTP_200_OK)
 def get_my_store(
     user_id: str = Depends(get_current_user),
@@ -586,7 +617,7 @@ def get_my_store(
     Mengambil data toko yang diklaim/dikelola oleh pengguna saat ini beserta riwayat iklannya.
     """
     now = datetime.now(timezone.utc)
-    owner = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).first()
+    owner = _pick_claim(_claim_rows(db, user_id))
     if not owner:
         # Cek apakah pengguna memiliki pengajuan toko baru (Jalur B) di DB yang sedang diproses atau ditolak
         sub = _get_user_latest_submission(user_id, db)
@@ -609,12 +640,15 @@ def get_my_store(
     if not store:
         return MyStoreResponse(is_claimed=False, campaigns=[])
 
-    campaigns = (
-        db.query(AdCampaign)
-        .filter(AdCampaign.store_id == store.id, AdCampaign.status != "deleted")
-        .order_by(AdCampaign.created_at.desc())
-        .all()
-    )
+    # Data kampanye dan pembayaran hanya untuk pemilik yang sudah terverifikasi (pending/ditolak: tidak).
+    campaigns = []
+    if _is_verified_owner(owner):
+        campaigns = (
+            db.query(AdCampaign)
+            .filter(AdCampaign.store_id == store.id, AdCampaign.status != "deleted")
+            .order_by(AdCampaign.created_at.desc())
+            .all()
+        )
 
     items = []
     for c in campaigns:
@@ -703,8 +737,10 @@ def claim_store(
     db: Session = Depends(get_db)
 ):
     """
-    Mengaitkan akun pengguna dengan toko yang dipilih sebagai pemilik toko.
+    Mengajukan klaim atas toko terdaftar. Wajib: nama, telepon, dokumen, dan foto (path hasil unggahan sendiri).
+    Satu klaim aktif (pending/verified) per (pengguna, toko); klaim yang ditolak tetap tersimpan sebagai riwayat.
     """
+    _require_own_evidence(user_id, payload.document_url, payload.store_photo_url)
     try:
         store = db.query(Store).filter(Store.id == payload.store_id).with_for_update().first()
         if not store:
@@ -728,44 +764,32 @@ def claim_store(
                 detail="Toko ini sudah memiliki pemilik terverifikasi."
             )
 
-        owner = db.query(StoreOwner).filter(StoreOwner.user_id == user_id).with_for_update().first()
-        app_name = payload.applicant_name.strip() if payload.applicant_name and payload.applicant_name.strip() else None
-        app_phone = payload.applicant_phone.strip() if payload.applicant_phone and payload.applicant_phone.strip() else None
-        app_role = payload.applicant_role.strip() if payload.applicant_role and payload.applicant_role.strip() else None
-
-        if not owner:
-            owner = StoreOwner(
-                user_id=user_id,
-                store_id=store.id,
-                status="pending",
-                rejection_reason=None,
-                applicant_name=app_name,
-                applicant_phone=app_phone,
-                applicant_role=app_role,
-                document_url=payload.document_url,
-                store_photo_url=payload.store_photo_url,
-            )
-            db.add(owner)
-        else:
-            if owner.status == "verified" and owner.verified_at is not None:
-                if str(owner.store_id) != str(store.id):
+        mine = _claim_rows(db, user_id, lock=True)
+        for row in mine:
+            if _is_verified_owner(row):
+                if str(row.store_id) != str(store.id):
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="Akun ini sudah menjadi pemilik terverifikasi toko lain."
                     )
                 return get_my_store(user_id=user_id, db=db)
-            owner.store_id = store.id
-            owner.status = "pending"
-            owner.verified_at = None
-            owner.rejection_reason = None
-            owner.applicant_name = app_name
-            owner.applicant_phone = app_phone
-            owner.applicant_role = app_role
-            owner.document_url = payload.document_url
-            owner.store_photo_url = payload.store_photo_url
+            if str(row.store_id) == str(store.id) and row.status == "pending":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Klaim Anda untuk toko ini sedang diproses."
+                )
 
+        db.add(StoreOwner(
+            user_id=user_id,
+            store_id=store.id,
+            status="pending",
+            applicant_name=payload.applicant_name,
+            applicant_phone=payload.applicant_phone,
+            applicant_role=payload.applicant_role.strip() if payload.applicant_role and payload.applicant_role.strip() else None,
+            document_url=payload.document_url,
+            store_photo_url=payload.store_photo_url,
+        ))
         db.commit()
-        db.refresh(owner)
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -903,12 +927,7 @@ def reject_store_claim(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toko yang dipilih tidak ditemukan.")
 
         # 2. Acquire row lock on target StoreOwner inside transaction (avoids stale read)
-        owner = (
-            db.query(StoreOwner)
-            .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
-            .with_for_update()
-            .first()
-        )
+        owner = _pick_claim(_claim_rows(db, payload.user_id, payload.store_id, lock=True))
         if not owner:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
 
@@ -929,6 +948,8 @@ def reject_store_claim(
         owner.status = "rejected"
         owner.verified_at = None
         owner.rejection_reason = clean_reason
+        owner.reviewed_by = admin_user.get("user_id")
+        owner.reviewed_at = datetime.now(timezone.utc)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -954,12 +975,7 @@ def verify_store_claim(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toko yang dipilih tidak ditemukan.")
 
         # 2. Acquire row lock on target StoreOwner inside transaction (avoids stale read)
-        owner = (
-            db.query(StoreOwner)
-            .filter(StoreOwner.user_id == payload.user_id, StoreOwner.store_id == payload.store_id)
-            .with_for_update()
-            .first()
-        )
+        owner = _pick_claim(_claim_rows(db, payload.user_id, payload.store_id, lock=True))
         if not owner:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Klaim toko tidak ditemukan.")
 
@@ -989,9 +1005,12 @@ def verify_store_claim(
         if other_owner:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Toko sudah memiliki pemilik terverifikasi.")
 
+        reviewed_at = datetime.now(timezone.utc)
         owner.status = "verified"
-        owner.verified_at = datetime.now(timezone.utc)
+        owner.verified_at = reviewed_at
         owner.rejection_reason = None
+        owner.reviewed_by = admin_user.get("user_id")
+        owner.reviewed_at = reviewed_at
 
         # 4. Atomically auto-reject competing pending claims for the same store
         competing_claims = (
@@ -1008,6 +1027,8 @@ def verify_store_claim(
             competing.status = "rejected"
             competing.verified_at = None
             competing.rejection_reason = "Toko telah diverifikasi untuk mitra lain."
+            competing.reviewed_by = admin_user.get("user_id")
+            competing.reviewed_at = reviewed_at
 
         db.commit()
     except IntegrityError:
@@ -1036,6 +1057,7 @@ def submit_new_store(
     Mengajukan pendaftaran toko baru yang belum tersedia di katalog (Jalur B: Pengajuan Toko Baru).
     Toko baru disimpan dalam antrean pending dan TIDAK langsung aktif di katalog publik.
     """
+    _require_own_evidence(user_id, payload.document_url, payload.store_photo_url)
     clean_name = payload.store_name.strip()
     clean_address = payload.store_address.strip()
     if not clean_name or len(clean_name) < 2:
@@ -1248,6 +1270,26 @@ def verify_new_store_submission(
             .with_for_update()
             .first()
         )
+        # Jangan menyerahkan toko yang sudah punya pemilik terverifikasi lain, dan jangan menimpa toko verified pemohon.
+        if store:
+            other_owner = (
+                db.query(StoreOwner)
+                .filter(
+                    StoreOwner.store_id == store.id,
+                    StoreOwner.status == "verified",
+                    StoreOwner.verified_at.isnot(None),
+                    StoreOwner.user_id != sub.user_id,
+                )
+                .first()
+            )
+            if other_owner:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Toko sudah memiliki pemilik terverifikasi.")
+        own_verified = next((r for r in _claim_rows(db, sub.user_id, lock=True) if _is_verified_owner(r)), None)
+        if own_verified and (not store or str(own_verified.store_id) != str(store.id)):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Pemohon sudah menjadi pemilik terverifikasi toko lain."
+            )
         if not store:
             # Koordinat dipilih pemohon; admin boleh mengoreksi. Tidak ada titik bawaan.
             lat = payload.latitude if payload.latitude is not None else sub.latitude
@@ -1268,23 +1310,29 @@ def verify_new_store_submission(
             db.flush()
 
         now = datetime.now(timezone.utc)
-        # 2. Cek apakah user sudah memiliki owner record
-        owner = db.query(StoreOwner).filter(StoreOwner.user_id == sub.user_id).with_for_update().first()
-        if not owner:
+        # 2. Jadikan pemohon pemilik terverifikasi tanpa menimpa riwayat klaimnya
+        admin_id = admin_user.get("user_id")
+        owner = next(
+            (r for r in _claim_rows(db, sub.user_id, store.id, lock=True) if r.status in ("pending", "verified")),
+            None,
+        )
+        if owner is None:
             owner = StoreOwner(
                 id=str(uuid.uuid4()),
                 user_id=sub.user_id,
                 store_id=store.id,
-                status="verified",
-                verified_at=now,
-                rejection_reason=None
+                applicant_name=sub.applicant_name,
+                applicant_phone=sub.applicant_phone,
+                applicant_role=sub.applicant_role,
+                document_url=sub.document_url,
+                store_photo_url=sub.store_photo_url,
             )
             db.add(owner)
-        else:
-            owner.store_id = store.id
-            owner.status = "verified"
-            owner.verified_at = now
-            owner.rejection_reason = None
+        owner.status = "verified"
+        owner.verified_at = now
+        owner.rejection_reason = None
+        owner.reviewed_by = admin_id
+        owner.reviewed_at = now
 
         # 3. Auto-reject competing pending submissions for same store
         competing = (
@@ -1292,7 +1340,8 @@ def verify_new_store_submission(
             .filter(
                 StoreSubmission.id != payload.submission_id,
                 StoreSubmission.status == "pending",
-                func.lower(StoreSubmission.store_name) == clean_name.lower()
+                func.lower(StoreSubmission.store_name) == clean_name.lower(),
+                func.lower(func.trim(StoreSubmission.store_address)) == clean_address.lower(),
             )
             .with_for_update()
             .all()

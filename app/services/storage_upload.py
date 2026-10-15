@@ -117,6 +117,15 @@ def detect_claim_evidence_type(contents: bytes, kind: str) -> Tuple[str, str]:
     )
 
 
+def new_claim_path(kind: str, ext: str, user_id: str) -> str:
+    """Path acak `{kind}/{32 hex}{16 hex MAC}{ext}`; MAC mengikat path ke user_id tanpa memuatnya."""
+    key = _claim_mac_key()
+    if key is None:
+        raise RuntimeError("SUPABASE_SERVICE_KEY kosong")
+    token = secrets.token_hex(16)
+    return f"{kind}/{token}{_claim_mac(key, kind, str(user_id), token)}{ext}"
+
+
 def store_private(contents: bytes, content_type: str, ext: str, kind: str, user_id: str) -> str:
     """
     Unggah bukti klaim ke bucket privat dan kembalikan path objek (bukan URL).
@@ -130,8 +139,7 @@ def store_private(contents: bytes, content_type: str, ext: str, kind: str, user_
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Penyimpanan berkas sedang tidak tersedia. Coba lagi nanti.",
         )
-    token = secrets.token_hex(16)
-    path = f"{kind}/{token}{_claim_mac(key, kind, str(user_id), token)}{ext}"
+    path = new_claim_path(kind, ext, user_id)
     try:
         supabase.storage.from_(CLAIM_BUCKET).upload(path, contents, {"content-type": content_type, "upsert": "false"})
     except Exception as exc:

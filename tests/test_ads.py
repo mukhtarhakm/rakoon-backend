@@ -5,6 +5,7 @@ from unittest.mock import patch
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -15,6 +16,7 @@ from app.main import app
 from app.database import Base, get_db
 from app.dependencies import get_current_user, get_current_admin_user
 from app.models.db_models import Store, StoreOwner, AdCampaign
+from claim_evidence import evidence_for
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(
@@ -75,9 +77,14 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(data[2]["duration_days"], 14)
         self.assertEqual(data[2]["price"], 50000)
 
+    def _claim_json(self, **extra):
+        """Claim payload with valid evidence for whoever is logged in right now."""
+        user_id = app.dependency_overrides[get_current_user]()
+        return {"store_id": str(self.store.id), **evidence_for(user_id), **extra}
+
     def test_claim_store_and_get_my_store(self):
         # Claim store
-        claim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        claim_res = self.client.post("/ads/claim-store", json=self._claim_json())
         self.assertEqual(claim_res.status_code, 200)
         claim_data = claim_res.json()
         self.assertFalse(claim_data["is_claimed"])
@@ -116,13 +123,13 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(self.client.get("/ads/pending-claims").json(), [])
 
         app.dependency_overrides[get_current_user] = lambda: OTHER_USER_ID
-        other_claim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        other_claim_res = self.client.post("/ads/claim-store", json=self._claim_json())
         self.assertEqual(other_claim_res.status_code, 409)
 
     def test_admin_claim_approval_rejection_and_authorization(self):
         """Verify admin claim list, approval, rejection, and strict authorization guards."""
         # 1. User claims store
-        claim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        claim_res = self.client.post("/ads/claim-store", json=self._claim_json())
         self.assertEqual(claim_res.status_code, 200)
 
         # 2. Non-admin (or unauthenticated) forbidden from admin claim endpoints
@@ -169,7 +176,7 @@ class TestAdsModule(unittest.TestCase):
         self.assertFalse(my_store.json()["is_claimed"])
 
         # 8. Merchant can re-claim (resets rejection_reason to None) and admin approves it
-        reclaim_res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        reclaim_res = self.client.post("/ads/claim-store", json=self._claim_json())
         self.assertEqual(reclaim_res.status_code, 200)
         self.assertEqual(reclaim_res.json()["claim_status"], "pending")
         self.assertIsNone(reclaim_res.json()["rejection_reason"])
@@ -190,7 +197,7 @@ class TestAdsModule(unittest.TestCase):
     def test_pending_claims_visibility_of_conflict_with_verified_owner(self):
         """When a store is already verified to one merchant, other pending claims for it show has_verified_owner=True."""
         # 1. First user claims and is verified
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.assertEqual(self.client.post("/ads/verify-claim", json={"user_id": TEST_USER_ID, "store_id": str(self.store.id)}).status_code, 200)
 
         # 2. Concurrently existing pending claim from second user for the same store
@@ -223,7 +230,7 @@ class TestAdsModule(unittest.TestCase):
     def test_create_campaign_starts_as_pending_payment_and_unpaid(self):
         """Campaign created without verified payment must start strictly as pending_payment and unpaid."""
         # Claim and verify store
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -254,7 +261,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_client_cannot_inject_payment_ref_as_proof(self):
         """Client supplying a fake payment_ref must have it ignored and cannot gain paid status."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -278,7 +285,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_client_cannot_force_active_or_paid_status(self):
         """Client attempting to inject status=active or payment_status=paid in request body must be ignored."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -300,7 +307,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_pending_payment_campaign_excluded_from_home_banners(self):
         """Campaigns that are not active or unpaid must never appear on public home banners."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -325,7 +332,7 @@ class TestAdsModule(unittest.TestCase):
     def test_merchant_cannot_access_other_merchant_campaign(self):
         """Merchant A cannot view or inspect campaign belonging to Merchant B."""
         # 1. Merchant A creates campaign
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -351,7 +358,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_unconfigured_payment_provider_fails_safely(self):
         """Calling pay endpoint when payment provider is unconfigured returns 503 fail-closed."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -380,7 +387,7 @@ class TestAdsModule(unittest.TestCase):
         self.db.commit()
         self.db.refresh(other_store)
 
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -428,7 +435,7 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(self.client.post("/ads/campaigns", json=payload).status_code, 201)
 
     def test_create_campaign_invalid_duration(self):
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -755,7 +762,7 @@ class TestAdsModule(unittest.TestCase):
         Security: Calling initiate payment when XENDIT_SECRET_KEY is present still returns
         HTTP 503 fail-closed and NEVER activates or marks the campaign as paid prematurely.
         """
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -787,7 +794,7 @@ class TestAdsModule(unittest.TestCase):
     def test_rejection_reason_persistence_and_privacy_isolation(self):
         """Admin rejection reason must persist in DB, be visible only to claim owner, and hidden from others."""
         # 1. User claims store
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
 
         # 2. Admin rejects with explicit reason
         reason_text = "Bukti foto surat izin usaha tidak valid dan buram."
@@ -827,7 +834,7 @@ class TestAdsModule(unittest.TestCase):
 
         # 1. User A (TEST_USER_ID) claims store
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
 
         # 2. User B and User C submit pending claims for the same store
         claim_b = StoreOwner(user_id=OTHER_USER_ID, store_id=self.store.id, status="pending")
@@ -872,7 +879,7 @@ class TestAdsModule(unittest.TestCase):
         self.assertEqual(store_b_res.json()["rejection_reason"], "Toko telah diverifikasi untuk mitra lain.")
 
         # 8. User B attempts to re-claim the already owned store: blocked with 409 Conflict
-        reclaim_b = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        reclaim_b = self.client.post("/ads/claim-store", json=self._claim_json())
         self.assertEqual(reclaim_b.status_code, 409)
         self.assertIn("sudah memiliki pemilik terverifikasi", reclaim_b.json()["detail"])
 
@@ -880,7 +887,7 @@ class TestAdsModule(unittest.TestCase):
         """If a failure occurs during verification, the entire transaction rolls back cleanly without partial mutations."""
         # 1. User A and User B have pending claims
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
 
         claim_b = StoreOwner(user_id=OTHER_USER_ID, store_id=self.store.id, status="pending")
         self.db.add(claim_b)
@@ -914,7 +921,7 @@ class TestAdsModule(unittest.TestCase):
         """Concurrent approvals for the same store: only one can succeed, second gets 409, and exactly 1 verified owner exists."""
         # 1. Setup pending claims for User A and User B
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
 
         claim_b = StoreOwner(user_id=OTHER_USER_ID, store_id=self.store.id, status="pending")
         self.db.add(claim_b)
@@ -952,7 +959,7 @@ class TestAdsModule(unittest.TestCase):
         """If a claim is rejected before or during approval serialization, approval must reject with 400 Bad Request."""
         # 1. Setup pending claim
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
 
         app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
 
@@ -982,7 +989,7 @@ class TestAdsModule(unittest.TestCase):
         """User whose claim was rejected cannot re-claim if store was verified to another merchant in the meantime."""
         # 1. User A claims store, gets rejected
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
 
         app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
         self.client.post("/ads/reject-claim", json={
@@ -1001,7 +1008,7 @@ class TestAdsModule(unittest.TestCase):
 
         # 3. User A attempts to re-claim: must be rejected with 409 Conflict
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        reclaim_a = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        reclaim_a = self.client.post("/ads/claim-store", json=self._claim_json())
         self.assertEqual(reclaim_a.status_code, 409)
         self.assertIn("sudah memiliki pemilik terverifikasi", reclaim_a.json()["detail"])
 
@@ -1037,7 +1044,7 @@ class TestAdsModule(unittest.TestCase):
         from sqlalchemy.orm import Session
 
         app.dependency_overrides[get_current_user] = lambda: TEST_USER_ID
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
 
         app.dependency_overrides[get_current_admin_user] = lambda: {"user_id": "admin", "role": "admin"}
 
@@ -1065,7 +1072,7 @@ class TestAdsModule(unittest.TestCase):
             raise IntegrityError("UNIQUE constraint failed: uq_store_owners_verified_store", params=None, orig=Exception())
 
         with patch.object(Session, "commit", faulty_commit):
-            res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+            res = self.client.post("/ads/claim-store", json=self._claim_json())
             self.assertEqual(res.status_code, 409)
             self.assertIn("sudah memiliki pemilik terverifikasi", res.json()["detail"])
 
@@ -1078,7 +1085,7 @@ class TestAdsModule(unittest.TestCase):
             raise RuntimeError("Simulated internal DB failure")
 
         with patch.object(Session, "commit", faulty_commit):
-            res = self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+            res = self.client.post("/ads/claim-store", json=self._claim_json())
             self.assertEqual(res.status_code, 500)
             self.assertEqual(res.headers.get("content-type"), "application/json")
             self.assertEqual(res.json(), {"detail": "Terjadi kesalahan pada server saat memproses klaim toko."})
@@ -1204,7 +1211,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_update_active_campaign_success(self):
         """Owner can update title and banner_url of an active campaign."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -1227,7 +1234,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_update_campaign_forbidden_for_other_user(self):
         """Non-owner cannot update campaign."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -1248,7 +1255,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_update_expired_campaign_fails(self):
         """Updating an expired campaign returns 400 indicating renewal is required."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -1274,7 +1281,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_delete_campaign_success(self):
         """Owner can delete their campaign (soft-delete, non-refundable)."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),
@@ -1307,7 +1314,7 @@ class TestAdsModule(unittest.TestCase):
 
     def test_delete_campaign_forbidden_for_other_user(self):
         """Non-owner cannot delete campaign."""
-        self.client.post("/ads/claim-store", json={"store_id": str(self.store.id)})
+        self.client.post("/ads/claim-store", json=self._claim_json())
         self.client.post("/ads/verify-claim", json={
             "user_id": TEST_USER_ID,
             "store_id": str(self.store.id),

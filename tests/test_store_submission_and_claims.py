@@ -10,11 +10,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.main import app
 from app.database import Base, get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
 from app.models.db_models import Store, StoreOwner, User, StoreSubmission
+from claim_evidence import evidence_for
 
 engine = create_engine(
     "sqlite:///:memory:",
@@ -77,12 +79,15 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         else:
             app.dependency_overrides.pop(get_current_admin_user, None)
 
-    def test_claim_store_with_only_store_id_succeeds_without_extra_fields(self):
-        """Klaim toko existing tanpa field tambahan dokumen/nama tetap berhasil HTTP 200 tanpa error 500."""
+    def test_claim_store_with_only_store_id_is_rejected_because_evidence_is_mandatory(self):
         self._login_as(self.user1_id)
-        payload = {
-            "store_id": str(self.store1.id)
-        }
+        res = self.client.post("/ads/claim-store", json={"store_id": str(self.store1.id)})
+        self.assertEqual(res.status_code, 422)
+        self.assertIsNone(self.db.query(StoreOwner).filter(StoreOwner.user_id == self.user1_id).first())
+
+    def test_claim_store_with_complete_evidence_succeeds(self):
+        self._login_as(self.user1_id)
+        payload = {"store_id": str(self.store1.id), **evidence_for(self.user1_id)}
         res = self.client.post("/ads/claim-store", json=payload)
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -97,14 +102,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
     def test_claim_store_existing_with_applicant_details(self):
         """Jalur A: Klaim toko yang sudah ada di katalog dengan detail pemohon dan dokumen."""
         self._login_as(self.user1_id)
-        payload = {
-            "store_id": str(self.store1.id),
-            "applicant_name": "Budi Santoso",
-            "applicant_phone": "081234567890",
-            "applicant_role": "Pemilik",
-            "document_url": "/ads/documents/doc_legalitas_nib.pdf",
-            "store_photo_url": "https://example.com/store_front.jpg"
-        }
+        evidence = evidence_for(self.user1_id)
+        payload = {"store_id": str(self.store1.id), **evidence}
         res = self.client.post("/ads/claim-store", json=payload)
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -112,7 +111,7 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self.assertEqual(data["claim_status"], "pending")
         self.assertEqual(data["applicant_name"], "Budi Santoso")
         self.assertEqual(data["applicant_role"], "Pemilik")
-        self.assertEqual(data["document_url"], "/ads/documents/doc_legalitas_nib.pdf")
+        self.assertEqual(data["document_url"], evidence["document_url"])
 
         # Cek record di DB: kolom fisik yang ada tersimpan dengan baik
         owner = self.db.query(StoreOwner).filter(StoreOwner.user_id == self.user1_id).first()
@@ -134,8 +133,7 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
             "applicant_name": "Siti Rahma",
             "applicant_phone": "089876543210",
             "applicant_role": "Pengurus Perusahaan",
-            "document_url": "/ads/documents/doc_cv_makmur.pdf",
-            "store_photo_url": "https://example.com/store_makmur.jpg"
+            **{k: v for k, v in evidence_for(self.user1_id).items() if k in ("document_url", "store_photo_url")},
         }
         res = self.client.post("/ads/submit-new-store", json=payload)
         self.assertEqual(res.status_code, 201)
@@ -195,10 +193,7 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         """Pengguna hanya dapat melihat pengajuan miliknya sendiri."""
         # User 1 mengajukan klaim toko existing
         self._login_as(self.user1_id)
-        self.client.post("/ads/claim-store", json={
-            "store_id": str(self.store1.id),
-            "applicant_name": "Budi User 1"
-        })
+        self.client.post("/ads/claim-store", json={"store_id": str(self.store1.id), **evidence_for(self.user1_id)})
 
         # User 2 mengajukan toko baru
         self._login_as(self.user2_id)
@@ -339,9 +334,7 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self._login_as(self.user1_id)
         res = self.client.post("/ads/claim-store", json={
             "store_id": str(self.store1.id),
-            "applicant_name": "Pemilik Sah",
-            "applicant_phone": "081234567890",
-            "applicant_role": "Pemilik"
+            **evidence_for(self.user1_id),
         })
         self.assertEqual(res.status_code, 200)
 
