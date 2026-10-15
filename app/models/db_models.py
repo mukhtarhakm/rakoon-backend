@@ -120,7 +120,7 @@ class StoreSubmission(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     # Deprecated: no longer read or written by the code; dropped in the contract phase.
-    store_category = Column(String, default="Supermarket", nullable=True)
+    store_category = Column(String, nullable=True)
     applicant_name = Column(String, nullable=False)
     applicant_phone = Column(String, nullable=False)
     applicant_role = Column(String, nullable=False)

@@ -127,6 +127,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self._login_as(self.user1_id)
         payload = {
             "store_name": "Warung Baru Makmur",
+            "latitude": -7.79,
+            "longitude": 110.37,
             "business_entity_name": "CV Makmur Sejahtera",
             "store_address": "Jl. Kaliurang KM 5 No. 12, Sleman",
             "applicant_name": "Siti Rahma",
@@ -161,6 +163,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         # 1. Menolak jika nama & alamat sudah ada di katalog toko
         payload_existing = {
             "store_name": "Toko Katalog Existing",
+            "latitude": -7.79,
+            "longitude": 110.37,
             "store_address": "Jl. Malioboro No. 10, Yogyakarta",
             "applicant_name": "Andi",
             "applicant_phone": "08123456789",
@@ -173,6 +177,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         # 2. Menolak jika user mengajukan toko yang sama berulang kali saat masih pending
         payload_new = {
             "store_name": "Toko Unik Baru",
+            "latitude": -7.79,
+            "longitude": 110.37,
             "store_address": "Jl. Gejayan No. 20, Sleman",
             "applicant_name": "Andi",
             "applicant_phone": "08123456789",
@@ -198,6 +204,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self._login_as(self.user2_id)
         self.client.post("/ads/submit-new-store", json={
             "store_name": "Toko Milik User 2",
+            "latitude": -7.79,
+            "longitude": 110.37,
             "store_address": "Jl. Palagan KM 8",
             "applicant_name": "Dewi User 2",
             "applicant_phone": "0811223344",
@@ -226,6 +234,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self._login_as(self.user1_id)
         sub_res = self.client.post("/ads/submit-new-store", json={
             "store_name": "Apotek Sehat Baru",
+            "latitude": -7.79,
+            "longitude": 110.37,
             "store_address": "Jl. Kusumanegara No. 50, Yogyakarta",
             "store_category": "Apotek & Kesehatan",
             "applicant_name": "Ahmad",
@@ -267,6 +277,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self._login_as(self.user2_id)
         sub_res2 = self.client.post("/ads/submit-new-store", json={
             "store_name": "Toko Kurang Bukti",
+            "latitude": -7.79,
+            "longitude": 110.37,
             "store_address": "Jl. Ringroad Utara No. 99",
             "applicant_name": "Rudi",
             "applicant_phone": "08199988877",
@@ -341,6 +353,8 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self._login_as(self.user1_id)
         payload = {
             "store_name": "Toko Belum Ada Tabel",
+            "latitude": -7.79,
+            "longitude": 110.37,
             "store_address": "Jl. Kaliurang KM 10",
             "applicant_name": "Doni",
             "applicant_phone": "0812334455",

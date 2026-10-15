@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
@@ -167,7 +167,8 @@ class SubmitNewStoreRequest(BaseModel):
     store_name: str = Field(..., min_length=2, description="Nama toko")
     business_entity_name: Optional[str] = Field(None, description="Nama badan usaha (opsional)")
     store_address: str = Field(..., min_length=5, description="Alamat lengkap toko")
-    store_category: Optional[str] = Field(None, description="Jenis atau kategori toko (opsional)")
+    latitude: float = Field(..., ge=-90, le=90, description="Latitude toko, dipilih pemohon di peta")
+    longitude: float = Field(..., ge=-180, le=180, description="Longitude toko, dipilih pemohon di peta")
     applicant_name: str = Field(..., min_length=2, description="Nama lengkap pemohon")
     applicant_phone: str = Field(..., min_length=8, description="Nomor kontak pemohon")
     applicant_role: str = Field(..., min_length=2, description="Peran pemohon")
@@ -190,6 +191,14 @@ class RejectStoreClaimRequest(BaseModel):
 
 class VerifyNewStoreRequest(BaseModel):
     submission_id: str = Field(..., description="ID pengajuan toko baru")
+    latitude: Optional[float] = Field(None, ge=-90, le=90, description="Koreksi latitude oleh admin (opsional)")
+    longitude: Optional[float] = Field(None, ge=-180, le=180, description="Koreksi longitude oleh admin (opsional)")
+
+    @model_validator(mode="after")
+    def _coordinates_come_as_a_pair(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("latitude dan longitude koreksi harus diisi bersamaan")
+        return self
 
 
 class RejectNewStoreRequest(BaseModel):
@@ -203,7 +212,8 @@ class UserSubmissionItem(BaseModel):
     store_id: Optional[str] = None
     store_name: str
     store_address: Optional[str] = None
-    store_category: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     business_entity_name: Optional[str] = None
     applicant_name: Optional[str] = None
     applicant_phone: Optional[str] = None
@@ -231,7 +241,8 @@ class PendingStoreClaimItem(BaseModel):
     applicant_phone: Optional[str] = None
     applicant_role: Optional[str] = None
     business_entity_name: Optional[str] = None
-    store_category: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     document_url: Optional[str] = None
     store_photo_url: Optional[str] = None
 
@@ -863,7 +874,8 @@ def get_pending_store_claims(
                 applicant_phone=getattr(sub, "applicant_phone", None),
                 applicant_role=getattr(sub, "applicant_role", None),
                 business_entity_name=getattr(sub, "business_entity_name", None),
-                store_category=getattr(sub, "store_category", None),
+                latitude=sub.latitude,
+                longitude=sub.longitude,
                 document_url=getattr(sub, "document_url", None),
                 store_photo_url=getattr(sub, "store_photo_url", None),
             )
@@ -1083,7 +1095,6 @@ def submit_new_store(
         )
 
     sub_id = str(uuid.uuid4())
-    cat = payload.store_category.strip() if payload.store_category and payload.store_category.strip() else None
 
     sub = StoreSubmission(
         id=sub_id,
@@ -1091,7 +1102,8 @@ def submit_new_store(
         store_name=clean_name,
         business_entity_name=payload.business_entity_name.strip() if payload.business_entity_name else None,
         store_address=clean_address,
-        store_category=cat or "Supermarket",
+        latitude=payload.latitude,
+        longitude=payload.longitude,
         applicant_name=payload.applicant_name.strip(),
         applicant_phone=payload.applicant_phone.strip(),
         applicant_role=payload.applicant_role.strip(),
@@ -1114,7 +1126,8 @@ def submit_new_store(
         store_id=None,
         store_name=clean_name,
         store_address=clean_address,
-        store_category=cat,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
         business_entity_name=payload.business_entity_name.strip() if payload.business_entity_name else None,
         applicant_name=payload.applicant_name.strip(),
         applicant_phone=payload.applicant_phone.strip(),
@@ -1177,7 +1190,8 @@ def get_my_submissions(
                         store_id=str(sub.created_store_id) if sub.created_store_id else None,
                         store_name=sub.store_name,
                         store_address=sub.store_address,
-                        store_category=sub.store_category,
+                        latitude=sub.latitude,
+                        longitude=sub.longitude,
                         business_entity_name=sub.business_entity_name,
                         applicant_name=sub.applicant_name,
                         applicant_phone=sub.applicant_phone,
@@ -1232,12 +1246,20 @@ def verify_new_store_submission(
             .first()
         )
         if not store:
+            # Koordinat dipilih pemohon; admin boleh mengoreksi. Tidak ada titik bawaan.
+            lat = payload.latitude if payload.latitude is not None else sub.latitude
+            lng = payload.longitude if payload.longitude is not None else sub.longitude
+            if lat is None or lng is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Pengajuan ini belum memiliki koordinat. Isi koordinat koreksi sebelum menyetujui.",
+                )
             store = Store(
                 id=str(uuid.uuid4()),
                 nama=clean_name,
                 alamat=clean_address,
-                lat=-7.7829,
-                lng=110.4083,
+                lat=lat,
+                lng=lng,
             )
             db.add(store)
             db.flush()
