@@ -81,6 +81,14 @@ class StoreOwner(Base):
             postgresql_where=text("status = 'verified' AND verified_at IS NOT NULL"),
             sqlite_where=text("status = 'verified' AND verified_at IS NOT NULL"),
         ),
+        Index(
+            "uq_store_owners_active_user_store",
+            "user_id",
+            "store_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'verified')"),
+            sqlite_where=text("status IN ('pending', 'verified')"),
+        ),
     )
 
     id = Column(Uuid(as_uuid=False), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
@@ -95,6 +103,8 @@ class StoreOwner(Base):
     applicant_role = Column(String, nullable=True)
     document_url = Column(String, nullable=True)
     store_photo_url = Column(String, nullable=True)
+    reviewed_by = Column(String, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
 
     store = relationship("Store")
 
@@ -107,6 +117,9 @@ class StoreSubmission(Base):
     store_name = Column(String, nullable=False)
     business_entity_name = Column(String, nullable=True)
     store_address = Column(String, nullable=False)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    # Deprecated: no longer read or written by the code; dropped in the contract phase.
     store_category = Column(String, default="Supermarket", nullable=True)
     applicant_name = Column(String, nullable=False)
     applicant_phone = Column(String, nullable=False)
