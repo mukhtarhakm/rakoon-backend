@@ -498,9 +498,9 @@ def _is_demo_campaign(campaign: AdCampaign) -> bool:
 
 @router.get("/home-banners", response_model=List[PublicBannerItem], status_code=status.HTTP_200_OK)
 def get_home_banners(
-    lat: float = Query(-7.7829, description="Latitude posisi pengguna"),
-    lng: float = Query(110.4083, description="Longitude posisi pengguna"),
-    radius_km: float = Query(15.0, description="Maksimum radius toko dari pengguna dalam km"),
+    lat: float = Query(-7.7829, ge=-90, le=90, description="Latitude posisi pengguna"),
+    lng: float = Query(110.4083, ge=-180, le=180, description="Longitude posisi pengguna"),
+    radius_km: float = Query(15.0, gt=0, le=100, description="Maksimum radius toko dari pengguna dalam km"),
     include_demo: bool = Query(False, description="Tampilkan banner contoh/demo secara eksplisit (terpisah dari iklan berbayar)"),
     db: Session = Depends(get_db)
 ):
