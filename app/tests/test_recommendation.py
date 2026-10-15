@@ -302,14 +302,6 @@ class TestRecommendedProductsEndpoint(unittest.TestCase):
         self.assertNotIn("INDOMIE", body)
         self.assertNotIn("BABARSARI", body)
 
-    def test_alias_route_also_returns_503_on_database_error(self):
-        from unittest.mock import MagicMock
-        from app.database import get_db
-        broken = MagicMock()
-        broken.query.side_effect = Exception("db down")
-        app.dependency_overrides[get_db] = lambda: broken
-        self.assertEqual(self.client.get("/recommendation/recommended").status_code, 503)
-
 
 if __name__ == "__main__":
     unittest.main()

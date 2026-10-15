@@ -328,7 +328,6 @@ RECOMMENDED_MAX_LIMIT = 50
 
 
 @router.get("/recommended-products", response_model=List[RecommendedProductItem], status_code=status.HTTP_200_OK)
-@router.get("/recommended", response_model=List[RecommendedProductItem], status_code=status.HTTP_200_OK)
 def get_recommended_products(
     lat: Optional[float] = Query(None, ge=-90, le=90, description="Latitude pengguna"),
     lng: Optional[float] = Query(None, ge=-180, le=180, description="Longitude pengguna"),

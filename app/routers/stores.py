@@ -157,7 +157,6 @@ def get_nearby_stores(
     )
 
 @router.get("/{store_id}/products", response_model=List[StoreProductItem], status_code=status.HTTP_200_OK)
-@router.get("/api/v1/stores/{store_id}/products", response_model=List[StoreProductItem], status_code=status.HTTP_200_OK)
 def get_store_products(
     store_id: str,
     limit: int = Query(MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Jumlah produk per halaman (maks 100)"),

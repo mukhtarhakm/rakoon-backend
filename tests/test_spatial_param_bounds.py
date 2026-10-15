@@ -49,7 +49,6 @@ class TestSpatialParamBounds(unittest.TestCase):
     def _urls(self, query):
         return {
             "recommended-products": f"/recommendation/recommended-products?{query}",
-            "recommended alias": f"/recommendation/recommended?{query}",
             "stores nearby": f"/stores/nearby?{query}",
             "price compare": f"/price/compare/{self.product.id}?{query}",
         }
@@ -92,9 +91,9 @@ class TestSpatialParamBounds(unittest.TestCase):
 
     def test_recommended_limit_must_be_between_one_and_the_maximum(self):
         for limit in (0, -1, RECOMMENDED_MAX_LIMIT + 1, 1000000):
-            self._assert_all_422(f"limit={limit}", endpoints=("recommended-products", "recommended alias"))
+            self._assert_all_422(f"limit={limit}", endpoints=("recommended-products",))
         for limit in (1, RECOMMENDED_MAX_LIMIT):
-            for name in ("recommended-products", "recommended alias"):
+            for name in ("recommended-products",):
                 with self.subTest(endpoint=name, limit=limit):
                     self.assertEqual(self.client.get(self._urls(f"limit={limit}")[name]).status_code, 200)
 
