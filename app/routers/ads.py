@@ -100,6 +100,26 @@ class HomeBannerItem(BaseModel):
     model_config = {"from_attributes": True, "extra": "ignore"}
 
 
+class PublicBannerItem(BaseModel):
+    """Banner untuk publik tanpa login: tanpa payment_ref dan price_paid (data transaksi mitra)."""
+    id: str
+    store_id: str
+    store_nama: str
+    store_alamat: Optional[str] = None
+    store_lat: Optional[float] = None
+    store_lng: Optional[float] = None
+    title: str
+    banner_url: str
+    duration_days: int
+    distance_km: float
+    expires_at: str
+    days_left: int
+    status: str = "active"
+    payment_method: Optional[str] = "QRIS"
+    payment_status: Optional[str] = "unpaid"
+
+    model_config = {"extra": "ignore"}
+
 
 class InitiatePaymentResponse(BaseModel):
     campaign_id: str
@@ -464,7 +484,7 @@ def _is_demo_campaign(campaign: AdCampaign) -> bool:
     )
 
 
-@router.get("/home-banners", response_model=List[HomeBannerItem], status_code=status.HTTP_200_OK)
+@router.get("/home-banners", response_model=List[PublicBannerItem], status_code=status.HTTP_200_OK)
 def get_home_banners(
     lat: float = Query(-7.7829, description="Latitude posisi pengguna"),
     lng: float = Query(110.4083, description="Longitude posisi pengguna"),
@@ -473,7 +493,8 @@ def get_home_banners(
     db: Session = Depends(get_db)
 ):
     """
-    Mengambil daftar banner iklan aktif dari toko terdekat di Yogyakarta.
+    Mengambil daftar banner iklan aktif dari toko dalam radius_km dari posisi pengguna.
+    Respons publik tidak memuat payment_ref maupun price_paid.
     Hanya kampanye yang memiliki bukti pembayaran resmi dari payment provider (Xendit)
     yang ditayangkan sebagai iklan berbayar komersial.
     Data historis berstatus 'paid' tanpa bukti provider tidak akan ditayangkan sebagai iklan komersial.
@@ -522,11 +543,10 @@ def get_home_banners(
         ).all()
     }
 
+    # Toko tanpa koordinat dianggap berada di pusat Yogyakarta (perilaku lama); jarak SELALU dari posisi pengguna.
     jogja_center_lat, jogja_center_lng = -7.7829, 110.4083
-    user_dist_to_jogja = haversine_distance(lat, lng, jogja_center_lat, jogja_center_lng)
-    is_outside_jogja = user_dist_to_jogja > 50.0
 
-    banner_items: List[HomeBannerItem] = []
+    banner_items: List[PublicBannerItem] = []
 
     for c in campaigns:
         is_demo = _is_demo_campaign(c)
@@ -540,20 +560,17 @@ def get_home_banners(
         store_lat = store.lat if store.lat is not None else jogja_center_lat
         store_lng = store.lng if store.lng is not None else jogja_center_lng
 
-        if is_outside_jogja:
-            dist = haversine_distance(jogja_center_lat, jogja_center_lng, store_lat, store_lng)
-        else:
-            dist = haversine_distance(lat, lng, store_lat, store_lng)
+        dist = haversine_distance(lat, lng, store_lat, store_lng)
+        # Bentuk `not (<=)` sengaja: jarak NaN (lat/lng "nan") ikut tersaring, bukan lolos.
+        if not (dist <= radius_km):
+            continue
 
         exp_utc = _ensure_utc(c.expires_at)
         delta = exp_utc - now
         days_left = max(1, delta.days + (1 if delta.seconds > 0 else 0))
 
-        if not is_outside_jogja and dist > radius_km:
-            continue
-
         banner_items.append(
-            HomeBannerItem(
+            PublicBannerItem(
                 id=str(c.id),
                 store_id=str(store.id),
                 store_nama=store.nama,
@@ -563,13 +580,11 @@ def get_home_banners(
                 title=c.title,
                 banner_url=c.banner_url,
                 duration_days=c.duration_days,
-                price_paid=c.price_paid,
                 distance_km=round(dist, 1),
                 expires_at=c.expires_at.isoformat(),
                 days_left=days_left,
                 status=getattr(c, "status", "active"),
                 payment_method="DEMO" if is_demo else getattr(c, "payment_method", "QRIS"),
-                payment_ref=getattr(c, "payment_ref", None),
                 payment_status="demo" if is_demo else "paid"
             )
         )
