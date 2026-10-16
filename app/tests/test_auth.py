@@ -577,22 +577,6 @@ class TestAuth(unittest.TestCase):
         import app.dependencies as deps
         getattr(deps, "_admin_confirm_cache", {}).clear()
 
-    def _clear_users(self):
-        from app.models.db_models import User
-        db = self.TestingSessionLocal()
-        db.query(User).delete()
-        db.commit()
-        db.close()
-
-    def _seed_user(self, role="user", email="db-user@example.com", nama="Nama DB"):
-        from app.models.db_models import User
-        self._clear_users()
-        db = self.TestingSessionLocal()
-        db.add(User(id=self.test_uuid, nama=nama, email=email, role=role))
-        db.commit()
-        db.close()
-        self.addCleanup(self._clear_users)
-
     def _prepare_http(self, mock_get, admin=None, admin_exc=None, admin_status=200, jwks_exc=None, jwks_status=200):
         """Router HTTP palsu: JWKS dan Supabase Admin API. Tidak ada jaringan sungguhan."""
         import app.dependencies as deps
@@ -661,16 +645,6 @@ class TestAuth(unittest.TestCase):
             response.json(),
             {"user_id": self.test_uuid, "email": None, "nama": None, "role": "user"},
         )
-        self.assertEqual(self.admin_calls, [])
-
-    @patch("app.dependencies.httpx.get")
-    def test_users_table_email_is_never_used_to_decide_admin(self, mock_get):
-        # Dulu: token tanpa email memakai email tabel users untuk mencocokkan ADMIN_EMAILS (P1-01/P1-02).
-        self._prepare_http(mock_get, admin=self.CONFIRMED)
-        self._seed_user(role="user", email=self.ADMIN_EMAIL, nama="Admin DB")
-        response = self._me(self._create_token(), admin_emails=self.ADMIN_EMAIL)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["role"], "user")
         self.assertEqual(self.admin_calls, [])
 
     # --- 2. Klaim role tidak lagi memberi admin ---------------------------------------------
@@ -749,10 +723,9 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(self.admin_calls, [])
 
     @patch("app.dependencies.httpx.get")
-    def test_old_sources_users_role_app_metadata_and_role_claim_do_not_grant_admin(self, mock_get):
+    def test_old_sources_app_metadata_and_role_claim_do_not_grant_admin(self, mock_get):
         # Regresi penghapusan sumber lama (P1-01/P1-05/P1-06): email tidak ada di ADMIN_EMAILS.
         self._prepare_http(mock_get, admin=self.CONFIRMED)
-        self._seed_user(role="admin")
         token = self._create_token(
             extra={"email": "other@example.com", "app_metadata": {"role": "admin"}, "role": "admin"}
         )
@@ -821,23 +794,6 @@ class TestAuth(unittest.TestCase):
         for _ in range(2):
             self.assertEqual(self._me(self._boss_token(), admin_emails=self.ADMIN_EMAIL).json()["role"], "user")
         self.assertEqual(len(self.admin_calls), 2)
-
-    @patch("app.dependencies.httpx.get")
-    def test_role_follows_token_email_not_users_table_email(self, mock_get):
-        self._prepare_http(mock_get, admin=self.CONFIRMED)
-        self._seed_user(role="user", email="db-only@example.com")
-        token = self._create_token(extra={"email": "token@example.com"})
-        response = self._me(token, admin_emails="db-only@example.com")
-        self.assertEqual(response.json()["role"], "user")
-        self.assertEqual(response.json()["email"], "token@example.com")
-
-    @patch("app.dependencies.httpx.get")
-    def test_users_table_role_never_changes_the_returned_role(self, mock_get):
-        self._prepare_http(mock_get)
-        for role in ("admin", "merchant", "user"):
-            with self.subTest(users_role=role):
-                self._seed_user(role=role)
-                self.assertEqual(self._me(self._create_token()).json()["role"], "user")
 
     @patch("app.dependencies.httpx.get")
     def test_admin_dependency_end_to_end_admin_passes_and_user_gets_403(self, mock_get):

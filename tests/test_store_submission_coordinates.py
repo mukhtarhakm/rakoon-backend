@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.main import app
 from app.database import Base, get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
-from app.models.db_models import Store, StoreOwner, StoreSubmission, User
+from app.models.db_models import Store, StoreOwner, StoreSubmission
 
 engine = create_engine(
     "sqlite:///:memory:",
@@ -56,11 +56,6 @@ class TestStoreSubmissionCoordinates(unittest.TestCase):
         self.client = TestClient(app)
         self.user_id = str(uuid.uuid4())
         self.admin_id = str(uuid.uuid4())
-        self.db.add_all([
-            User(id=self.user_id, email="pemohon@example.com", nama="Pemohon", role="user"),
-            User(id=self.admin_id, email="admin@example.com", nama="Admin", role="admin"),
-        ])
-        self.db.commit()
 
     def tearDown(self):
         self.db.close()

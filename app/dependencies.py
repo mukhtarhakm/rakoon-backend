@@ -9,9 +9,6 @@ from typing import Dict, Any, Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.models.db_models import User
 
 load_dotenv(override=False)
 
@@ -348,13 +345,12 @@ def get_user_identities(user_ids) -> Dict[str, Dict[str, Optional[str]]]:
 def get_current_user_profile(
     user_id: str = Depends(get_current_user),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
     Mengembalikan data profil pengguna aktif (user_id, email, nama, role).
     Opsi B: role 'admin' HANYA bila email pada token yang terverifikasi ada di ADMIN_EMAILS
     (tanpa beda huruf besar/kecil dan spasi) DAN email_confirmed_at terisi menurut Supabase Admin API.
-    users.role, app_metadata.role, dan klaim role TIDAK dipakai. Tabel users hanya mengisi nama/email tampilan.
+    users.role, app_metadata.role, dan klaim role TIDAK dipakai. Nama/email hanya dari klaim token.
     """
     claims: Dict[str, Any] = {}
     if credentials and credentials.credentials:
@@ -369,17 +365,6 @@ def get_current_user_profile(
         nama = None
 
     email = token_email
-    try:
-        user_db = db.query(User).filter(User.id == str(user_id)).first()
-    except Exception as e:
-        logger.warning(f"Error querying user_db for user_id '{user_id}': {e}")
-        db.rollback()
-        user_db = None
-    if user_db:
-        if not email and user_db.email:
-            email = user_db.email
-        if not nama and user_db.nama:
-            nama = user_db.nama
 
     return {
         "user_id": user_id,

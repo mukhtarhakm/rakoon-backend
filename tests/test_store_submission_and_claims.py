@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.main import app
 from app.database import Base, get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
-from app.models.db_models import Store, StoreOwner, User, StoreSubmission
+from app.models.db_models import Store, StoreOwner, StoreSubmission
 from claim_evidence import evidence_for
 
 engine = create_engine(
@@ -45,10 +45,6 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
         self.user2_id = str(uuid.uuid4())
         self.admin_id = str(uuid.uuid4())
 
-        self.user1 = User(id=self.user1_id, email="user1@example.com", nama="Pemohon Satu", role="user")
-        self.user2 = User(id=self.user2_id, email="user2@example.com", nama="Pemohon Dua", role="user")
-        self.admin = User(id=self.admin_id, email="admin@example.com", nama="Admin Rakoon", role="admin")
-
         self.store1 = Store(
             id=str(uuid.uuid4()),
             nama="Toko Katalog Existing",
@@ -56,7 +52,7 @@ class TestStoreSubmissionAndClaims(unittest.TestCase):
             lat=-7.7925,
             lng=110.3658
         )
-        self.db.add_all([self.user1, self.user2, self.admin, self.store1])
+        self.db.add_all([self.store1])
         self.db.commit()
 
     def tearDown(self):

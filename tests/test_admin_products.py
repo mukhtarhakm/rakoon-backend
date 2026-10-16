@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.database import Base, get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
-from app.models.db_models import Product, User
+from app.models.db_models import Product
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(
@@ -58,22 +58,6 @@ class TestAdminProducts(unittest.TestCase):
         )
         self.db.add(prod)
 
-        # Regular user
-        reg_user = User(
-            id=TEST_USER_ID,
-            nama="Budi Santoso",
-            email="budi@example.com",
-            role="user"
-        )
-        # Admin user
-        admin_user = User(
-            id=TEST_ADMIN_ID,
-            nama="Admin Rakoon",
-            email="admin@rakoon.app",
-            role="admin"
-        )
-        self.db.add(reg_user)
-        self.db.add(admin_user)
         self.db.commit()
 
         # Mock Supabase Storage to prevent polluting live storage with test artifacts
@@ -124,14 +108,14 @@ class TestAdminProducts(unittest.TestCase):
         self.assertEqual(data["role"], "user")
         mock_get.assert_not_called()
 
-    def test_users_table_admin_role_no_longer_grants_admin(self):
-        # Opsi B: kolom users.role='admin' tidak lagi menjadi sumber admin.
-        res, mock_get = self._get_profile(TEST_ADMIN_ID, {"email": "admin@example.com"})
+    def test_profile_never_touches_the_database(self):
+        # Nama/email profil hanya dari klaim token; tabel users sudah tidak dipakai.
+        spy_db = MagicMock()
+        app.dependency_overrides[get_db] = lambda: spy_db
+        res, _ = self._get_profile(TEST_ADMIN_ID, {"email": "admin@example.com"})
         self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertEqual(data["user_id"], TEST_ADMIN_ID)
-        self.assertEqual(data["role"], "user")
-        mock_get.assert_not_called()
+        self.assertEqual(res.json()["role"], "user")
+        spy_db.query.assert_not_called()
 
     def test_get_my_profile_admin_via_env_with_confirmed_email(self):
         res, mock_get = self._get_profile(
