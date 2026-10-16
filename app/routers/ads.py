@@ -13,8 +13,8 @@ from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.database import get_db
-from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile
-from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, User, StoreSubmission
+from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile, get_user_identities
+from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, StoreSubmission
 from app.services import xendit_service
 from app.routers.stores import haversine_distance
 from app.services.storage_upload import (
@@ -866,7 +866,7 @@ def get_pending_store_claims(
 
     user_ids = [str(owner.user_id) for owner, _ in rows] + [str(sub.user_id) for sub in sub_rows]
     store_ids = [store.id for _, store in rows]
-    users_map = {str(u.id): u for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
+    identities = get_user_identities(user_ids) if user_ids else {}
 
     verified_store_ids = set()
     if store_ids:
@@ -885,15 +885,15 @@ def get_pending_store_claims(
 
     # Map existing store claims
     for owner, store in rows:
-        u = users_map.get(str(owner.user_id))
+        u = identities.get(str(owner.user_id), {})
         results.append(
             PendingStoreClaimItem(
                 user_id=str(owner.user_id),
                 store_id=str(store.id),
                 store_nama=store.nama,
                 store_alamat=store.alamat,
-                user_nama=u.nama if u else None,
-                user_email=u.email if u else None,
+                user_nama=u.get("nama"),
+                user_email=u.get("email"),
                 status=owner.status,
                 created_at=owner.created_at.isoformat() if owner.created_at else "",
                 has_verified_owner=str(store.id) in verified_store_ids,
@@ -909,15 +909,15 @@ def get_pending_store_claims(
 
     # Map new store submissions
     for sub in sub_rows:
-        u = users_map.get(str(sub.user_id))
+        u = identities.get(str(sub.user_id), {})
         results.append(
             PendingStoreClaimItem(
                 user_id=str(sub.user_id),
                 store_id=None,
                 store_nama=sub.store_name,
                 store_alamat=sub.store_address,
-                user_nama=u.nama if u else None,
-                user_email=u.email if u else None,
+                user_nama=u.get("nama"),
+                user_email=u.get("email"),
                 status=sub.status,
                 created_at=sub.created_at.isoformat() if sub.created_at else "",
                 has_verified_owner=False,

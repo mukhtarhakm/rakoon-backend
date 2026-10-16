@@ -4,6 +4,7 @@ import uuid
 import logging
 import jwt
 import httpx
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -277,6 +278,71 @@ def _is_confirmed_admin(user_id: str, token_email: Optional[str]) -> bool:
     if email not in get_admin_emails():
         return False
     return _email_confirmed_via_admin_api(user_id, email)
+
+
+IDENTITY_TTL_SECONDS = 300.0
+IDENTITY_MAX_LOOKUPS = 50
+IDENTITY_WORKERS = 5
+_identity_cache: Dict[str, tuple] = {}
+
+
+def _fetch_identity(user_id: str, service_key: str) -> Optional[Dict[str, Optional[str]]]:
+    try:
+        response = httpx.get(
+            f"{base_url}/auth/v1/admin/users/{user_id}",
+            headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+            timeout=ADMIN_API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        logger.warning(f"Supabase Admin API identity lookup failed ({type(e).__name__}).")
+        return None
+    if not isinstance(data, dict):
+        return None
+    meta = data.get("user_metadata") if isinstance(data.get("user_metadata"), dict) else {}
+    nama = meta.get("name") or meta.get("full_name") or meta.get("display_name")
+    email = data.get("email")
+    return {
+        "nama": nama if isinstance(nama, str) else None,
+        "email": email if isinstance(email, str) else None,
+    }
+
+
+def get_user_identities(user_ids) -> Dict[str, Dict[str, Optional[str]]]:
+    """
+    Nama/email akun lewat Supabase Admin API, untuk tampilan admin. Best-effort: id yang gagal
+    dicari tidak ada di hasil (bukan error). Id unik, hanya UUID valid, maks IDENTITY_MAX_LOOKUPS
+    panggilan per pemanggilan (sisanya dilewati), paralel terbatas IDENTITY_WORKERS, hasil
+    positif dicache IDENTITY_TTL_SECONDS.
+    """
+    now = time.time()
+    result: Dict[str, Dict[str, Optional[str]]] = {}
+    todo = []
+    for raw in dict.fromkeys(str(u) for u in user_ids):
+        try:
+            uid = str(uuid.UUID(raw))
+        except ValueError:
+            continue
+        cached = _identity_cache.get(uid)
+        if cached and cached[0] > now:
+            result[raw] = cached[1]
+        else:
+            todo.append((raw, uid))
+    service_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+    todo = todo[:IDENTITY_MAX_LOOKUPS]
+    if not todo or not service_key:
+        return result
+
+    with ThreadPoolExecutor(max_workers=IDENTITY_WORKERS) as pool:
+        fetched = list(pool.map(lambda t: _fetch_identity(t[1], service_key), todo))
+    for key in [k for k, (expiry, _) in _identity_cache.items() if expiry <= now]:
+        del _identity_cache[key]
+    for (raw, uid), identity in zip(todo, fetched):
+        if identity is not None:
+            _identity_cache[uid] = (now + IDENTITY_TTL_SECONDS, identity)
+            result[raw] = identity
+    return result
 
 
 def get_current_user_profile(
