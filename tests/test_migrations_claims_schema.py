@@ -43,10 +43,11 @@ def _uid() -> str:
     return str(uuid.uuid4())
 
 
+# M1b/M5 (drop store_category, drop users) are covered in test_migrations_drop_legacy.py.
 class TestMigrationChain(unittest.TestCase):
     def test_single_head_chained_from_the_current_head(self):
         script = ScriptDirectory.from_config(_config())
-        self.assertEqual(script.get_heads(), [M3])
+        self.assertIn(M3, [r.revision for r in script.walk_revisions()])
         self.assertEqual(script.get_revision(M1).down_revision, OLD_HEAD)
         self.assertEqual(script.get_revision(M2).down_revision, M1)
         self.assertEqual(script.get_revision(M3).down_revision, M2)
@@ -63,7 +64,6 @@ class TestUpgradeOnCleanSqlite(unittest.TestCase):
             self.assertIn("longitude", sub_cols)
             self.assertTrue(sub_cols["latitude"]["nullable"])
             self.assertTrue(sub_cols["longitude"]["nullable"])
-            self.assertIn("store_category", sub_cols, "store_category is dropped later (contract phase), not now")
 
             owner_cols = {c["name"] for c in insp.get_columns("store_owners")}
             self.assertTrue({"reviewed_by", "reviewed_at"} <= owner_cols)

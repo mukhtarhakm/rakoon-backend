@@ -101,7 +101,6 @@ class TestStoreSubmissionCoordinates(unittest.TestCase):
 
         row = self.db.query(StoreSubmission).one()
         self.assertEqual((row.latitude, row.longitude), (3.5952, 98.6722))
-        self.assertIsNone(row.store_category)
 
     def test_reads_do_not_expose_store_category_and_show_coordinates(self):
         self._submit()

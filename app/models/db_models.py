@@ -5,15 +5,6 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Uui
 from sqlalchemy.orm import relationship
 from app.database import Base
 
-class User(Base):
-    __tablename__ = "users"
-    
-    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
-    nama = Column(String, nullable=False)
-    email = Column(String, unique=True, index=True, nullable=False)
-    reputasi_score = Column(Integer, default=0)
-    role = Column(String, default="user", nullable=False)
-
 class Store(Base):
     __tablename__ = "stores"
     
@@ -119,8 +110,6 @@ class StoreSubmission(Base):
     store_address = Column(String, nullable=False)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
-    # Deprecated: no longer read or written by the code; dropped in the contract phase.
-    store_category = Column(String, nullable=True)
     applicant_name = Column(String, nullable=False)
     applicant_phone = Column(String, nullable=False)
     applicant_role = Column(String, nullable=False)
