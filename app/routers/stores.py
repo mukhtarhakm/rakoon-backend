@@ -1,7 +1,7 @@
 import math
 import uuid
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
@@ -71,6 +71,19 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     
     return R * c
+
+def optional_user_location(
+    lat: Optional[float] = Query(None, ge=-90, le=90, description="Latitude pengguna"),
+    lng: Optional[float] = Query(None, ge=-180, le=180, description="Longitude pengguna"),
+) -> Optional[Tuple[float, float]]:
+    """Lokasi opsional: lat dan lng harus ada bersamaan (salah satu saja -> 422)."""
+    if (lat is None) != (lng is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Parameter lat dan lng harus diisi bersamaan.",
+        )
+    return None if lat is None else (lat, lng)
+
 
 def get_candidate_stores(db: Session, lat: float, lng: float, radius_km: float) -> List[Store]:
     """

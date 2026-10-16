@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, status, UploadFile, File
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 from pydantic import BaseModel, Field
 import logging
 
@@ -11,6 +11,7 @@ from app.models.schemas import MAX_PAGE_SIZE, ProductCategoryType, ProductPhotoU
 from app.dependencies import get_current_admin_user
 from app.services.storage_upload import upload_image
 from app.services.errors import safe_error
+from app.routers.stores import haversine_distance, optional_user_location
 from app.services.current_price import CurrentPrice, get_current_prices, pick_cheapest
 
 from uuid import UUID
@@ -44,6 +45,7 @@ class ProductCatalogItem(BaseModel):
     foto_url: Optional[str] = Field(None, description="URL foto produk")
     updated_at: Optional[str] = Field(None, description="Timestamp ISO harga yang ditampilkan (harga terkini)")
     stale: bool = Field(False, description="True bila harga yang ditampilkan berumur lebih dari 90 hari")
+    jarak_km: Optional[float] = Field(None, description="Jarak (km) dari lat/lng pengguna ke toko harga terendah; null bila lat/lng atau koordinat toko tidak ada")
 
 
 def _escape_like(text: str) -> str:
@@ -118,6 +120,7 @@ def get_products_catalog(
     category: Optional[str] = Query(None, description="Filter kategori (cocok persis, tanpa beda huruf besar/kecil)"),
     limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE, description="Jumlah produk per halaman (maks 100)"),
     offset: int = Query(0, ge=0, description="Lewati sejumlah produk (urut nama)"),
+    location: Optional[Tuple[float, float]] = Depends(optional_user_location),
     db: Session = Depends(get_db)
 ):
     """
@@ -136,11 +139,17 @@ def get_products_catalog(
         prices_by_product.setdefault(pid, []).append(price)
     best_by_product = {pid: pick_cheapest(prices) for pid, prices in prices_by_product.items()}
 
-    store_names: dict[str, str] = {}
+    stores_by_id: dict[str, Store] = {}
     needed_store_ids = {best.store_id for best in best_by_product.values()}
     if needed_store_ids:
         for s in db.query(Store).filter(Store.id.in_(needed_store_ids)).all():
-            store_names[str(s.id)] = s.nama
+            stores_by_id[str(s.id)] = s
+
+    def distance_to(store_id: str) -> Optional[float]:
+        store = stores_by_id.get(store_id)
+        if location is None or store is None or store.lat is None or store.lng is None:
+            return None
+        return round(haversine_distance(location[0], location[1], store.lat, store.lng), 2)
 
     catalog_items: List[ProductCatalogItem] = []
     for prod in products:
@@ -154,11 +163,12 @@ def get_products_catalog(
                 ukuran=prod.ukuran,
                 satuan=prod.satuan,
                 harga_terendah=float(best.harga) if best else None,
-                nama_toko_terendah=store_names.get(best.store_id) if best else None,
+                nama_toko_terendah=stores_by_id[best.store_id].nama if best and best.store_id in stores_by_id else None,
                 jumlah_toko=len(prices_by_product.get(pid, [])),
                 foto_url=getattr(prod, "foto_url", None),
                 updated_at=best.timestamp.isoformat() if best else None,
                 stale=best.stale if best else False,
+                jarak_km=distance_to(best.store_id) if best else None,
             )
         )
 
