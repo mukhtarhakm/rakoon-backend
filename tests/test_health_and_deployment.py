@@ -137,16 +137,10 @@ class TestHealthAndDeploymentReadiness(unittest.TestCase):
         self.assertEqual(web_service.get("type"), "web")
         self.assertEqual(web_service.get("healthCheckPath"), "/health")
 
-        # Verify startCommand sequences migration before uvicorn
+        # Produksi tidak menjalankan Alembic saat start: migrasi dijalankan manual dari mesin pengembang (SETUP.md 2.5).
         start_cmd = web_service.get("startCommand", "")
-        self.assertIn("alembic upgrade head", start_cmd, "startCommand must execute alembic upgrade head")
-        self.assertIn("uvicorn app.main:app", start_cmd, "startCommand must start uvicorn")
-        self.assertIn("&&", start_cmd, "startCommand must use && to ensure migration failure halts startup")
-
-        # Verify alembic appears before uvicorn in startCommand
-        alembic_idx = start_cmd.find("alembic upgrade head")
-        uvicorn_idx = start_cmd.find("uvicorn")
-        self.assertLess(alembic_idx, uvicorn_idx, "alembic upgrade head must be executed before uvicorn")
+        self.assertNotIn("alembic", start_cmd, "startCommand must not run alembic; migrations are manual")
+        self.assertEqual(start_cmd, "uvicorn app.main:app --host 0.0.0.0 --port $PORT --no-access-log")
 
         # Verify migration guard environment variables are declared
         env_vars = {item["key"]: item for item in web_service.get("envVars", [])}

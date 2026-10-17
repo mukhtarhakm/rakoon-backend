@@ -6,10 +6,9 @@ services:
     plan: free
     rootDir: .
     buildCommand: pip install -r requirements.txt
-    # Menjalankan Alembic migration sebelum Uvicorn mulai melayani request.
-    # Jika migration gagal, proses berhenti dengan exit code gagal dan Uvicorn tidak dijalankan.
-    # Catatan: Jika instance di-upgrade ke tier berbayar (Starter+), command ini juga dapat menggunakan preDeployCommand.
-    startCommand: python -m alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --no-access-log
+    # Render TIDAK menjalankan Alembic. Migrasi produksi dijalankan manual dari mesin pengembang
+    # sebelum deploy kode baru (lihat SETUP.md bagian 2.5).
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --no-access-log
     envVars:
       - key: SUPABASE_URL
         sync: false        # Diisi manual di Render Dashboard
