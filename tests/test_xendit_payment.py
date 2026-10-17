@@ -1454,6 +1454,32 @@ class TestXenditPaymentIntegration(unittest.TestCase):
         self.assertIn("XENDIT_WEBHOOK_TOKEN", res.json()["detail"])
         self.assertNotIn(CALLBACK_TOKEN, res.text)
 
+    def test_61_webhook_db_work_runs_off_event_loop_thread(self):
+        import threading
+        from sqlalchemy.orm import Session
+        from app.services import xendit_service
+
+        loop_threads, db_threads = set(), set()
+        real_verify = xendit_service.verify_webhook_token
+        real_query = Session.query
+
+        def verify(token):
+            loop_threads.add(threading.get_ident())
+            return real_verify(token)
+
+        def query(session, *args, **kwargs):
+            db_threads.add(threading.get_ident())
+            return real_query(session, *args, **kwargs)
+
+        with patch.object(xendit_service, "verify_webhook_token", verify), \
+                patch.object(Session, "query", query):
+            res = self._webhook({"external_id": "tidak-ada", "status": "PAID",
+                                 "paid_amount": 15000, "currency": "IDR"})
+
+        self.assertEqual(res.status_code, 404)
+        self.assertTrue(loop_threads and db_threads)
+        self.assertTrue(db_threads.isdisjoint(loop_threads))
+
 
 if __name__ == "__main__":
     unittest.main()

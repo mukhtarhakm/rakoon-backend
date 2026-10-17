@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
+from fastapi.concurrency import run_in_threadpool
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status, UploadFile, File
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
@@ -2091,6 +2092,11 @@ async def xendit_webhook(
             detail="Invalid JSON payload"
         )
 
+    # DB sinkron: jalankan di thread terpisah agar event loop tidak terblokir.
+    return await run_in_threadpool(_process_xendit_webhook, payload, db)
+
+
+def _process_xendit_webhook(payload: dict, db: Session):
     xendit_id = payload.get("id")
     external_id = payload.get("external_id")
     event_status = str(payload.get("status") or "").upper()
