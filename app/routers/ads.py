@@ -1550,6 +1550,50 @@ async def upload_ad_banner(
     return {"banner_url": banner_url}
 
 
+CAMPAIGN_DEDUP_WINDOW = timedelta(minutes=10)
+
+
+def _find_recent_duplicate_campaign(db: Session, user_id: str, store_id, payload: CreateCampaignRequest, now: datetime):
+    """Kampanye pending_payment/unpaid milik user+toko yang sama, isi identik, dibuat dalam jendela dedup."""
+    return (
+        db.query(AdCampaign)
+        .filter(
+            AdCampaign.owner_user_id == user_id,
+            AdCampaign.store_id == store_id,
+            AdCampaign.status == "pending_payment",
+            AdCampaign.payment_status == "unpaid",
+            AdCampaign.duration_days == payload.duration_days,
+            AdCampaign.title == payload.title.strip(),
+            AdCampaign.banner_url == payload.banner_url.strip(),
+            AdCampaign.created_at >= now - CAMPAIGN_DEDUP_WINDOW,
+        )
+        .order_by(AdCampaign.created_at.desc())
+        .first()
+    )
+
+
+def _campaign_to_banner_item(campaign: AdCampaign, store: Store) -> HomeBannerItem:
+    return HomeBannerItem(
+        id=str(campaign.id),
+        store_id=str(store.id),
+        store_nama=store.nama,
+        store_alamat=store.alamat,
+        store_lat=store.lat,
+        store_lng=store.lng,
+        title=campaign.title,
+        banner_url=campaign.banner_url,
+        duration_days=campaign.duration_days,
+        price_paid=campaign.price_paid,
+        distance_km=0.0,
+        expires_at=campaign.expires_at.isoformat(),
+        days_left=campaign.duration_days,
+        status=campaign.status,
+        payment_method=campaign.payment_method,
+        payment_ref=campaign.payment_ref,
+        payment_status=campaign.payment_status
+    )
+
+
 @router.post("/campaigns", response_model=HomeBannerItem, status_code=status.HTTP_201_CREATED)
 def create_ad_campaign(
     payload: CreateCampaignRequest,
@@ -1558,8 +1602,11 @@ def create_ad_campaign(
 ):
     """
     Membuat kampanye iklan promo offline baru dengan batas waktu tayang dan konfirmasi pembayaran.
+    Idempotent: create identik oleh pemilik yang sama dalam CAMPAIGN_DEDUP_WINDOW mengembalikan kampanye
+    pending_payment yang sudah ada (lihat _find_recent_duplicate_campaign).
     """
-    store = db.query(Store).filter(Store.id == payload.store_id).first()
+    # Kunci baris toko menyerialkan create bersamaan untuk toko yang sama (urutan kunci seperti claim-store).
+    store = db.query(Store).filter(Store.id == payload.store_id).with_for_update().first()
     if not store:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1591,6 +1638,10 @@ def create_ad_campaign(
         )
 
     now = datetime.now(timezone.utc)
+    campaign = _find_recent_duplicate_campaign(db, user_id, store.id, payload, now)
+    if campaign is not None:
+        return _campaign_to_banner_item(campaign, store)
+
     expires_at = now + timedelta(days=payload.duration_days)
     # Server-generated official invoice reference; client-supplied payment_ref is NEVER trusted as proof
     invoice_ref = f"INV-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
@@ -1615,25 +1666,7 @@ def create_ad_campaign(
     db.commit()
     db.refresh(campaign)
 
-    return HomeBannerItem(
-        id=str(campaign.id),
-        store_id=str(store.id),
-        store_nama=store.nama,
-        store_alamat=store.alamat,
-        store_lat=store.lat,
-        store_lng=store.lng,
-        title=campaign.title,
-        banner_url=campaign.banner_url,
-        duration_days=campaign.duration_days,
-        price_paid=campaign.price_paid,
-        distance_km=0.0,
-        expires_at=campaign.expires_at.isoformat(),
-        days_left=campaign.duration_days,
-        status=campaign.status,
-        payment_method=campaign.payment_method,
-        payment_ref=campaign.payment_ref,
-        payment_status=campaign.payment_status
-    )
+    return _campaign_to_banner_item(campaign, store)
 
 
 @router.get("/campaigns/{campaign_id}", response_model=HomeBannerItem, status_code=status.HTTP_200_OK)

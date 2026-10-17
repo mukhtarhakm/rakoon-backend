@@ -1399,6 +1399,9 @@ class TestXenditPaymentIntegration(unittest.TestCase):
     @patch("app.services.xendit_service.create_invoice")
     def test_57_my_store_reconcile_only_touches_own_pending_campaigns(self, mock_create_inv, mock_by_id):
         cid_a, ext_a, inv_a = self._pay_campaign(mock_create_inv)
+        # create identik dalam 10 menit di-dedup; geser A keluar jendela agar B kampanye terpisah
+        self.db.query(AdCampaign).update({AdCampaign.created_at: datetime.now(timezone.utc) - timedelta(minutes=11)})
+        self.db.commit()
         cid_b, ext_b, inv_b = self._pay_campaign(mock_create_inv)
         other = AdCampaign(
             store_id=self.store.id, owner_user_id=OTHER_USER_ID, title="Milik Orang Lain",
