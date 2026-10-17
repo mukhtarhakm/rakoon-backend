@@ -308,3 +308,36 @@ class TestAdminProducts(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["foto_url"], test_url)
+
+    def test_upload_photo_db_work_runs_off_event_loop_thread(self):
+        import threading
+        from sqlalchemy.orm import Session
+        from app.routers import products
+
+        self._as_admin()
+        loop_threads, db_threads = set(), set()
+        real_upload, real_query, real_commit = products.upload_image, Session.query, Session.commit
+
+        async def upload(*args, **kwargs):
+            loop_threads.add(threading.get_ident())
+            return await real_upload(*args, **kwargs)
+
+        def query(session, *args, **kwargs):
+            db_threads.add(threading.get_ident())
+            return real_query(session, *args, **kwargs)
+
+        def commit(session):
+            db_threads.add(threading.get_ident())
+            return real_commit(session)
+
+        png = io.BytesIO(b"\x89PNG\r\n\x1a\nbody")
+        with patch.object(products, "upload_image", upload), \
+                patch.object(Session, "query", query), patch.object(Session, "commit", commit):
+            res = self.client.post(
+                f"/products/{self.prod_id}/upload-photo",
+                files={"file": ("susu.png", png, "image/png")}
+            )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(loop_threads and db_threads)
+        self.assertTrue(db_threads.isdisjoint(loop_threads))

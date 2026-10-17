@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, status, UploadFile, File
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from fastapi.concurrency import run_in_threadpool
 from typing import List, Optional, Tuple, Union
 from pydantic import BaseModel, Field
 import logging
@@ -261,31 +262,16 @@ def update_product_photo_url(
         )
 
 
-@router.post("/{product_id}/upload-photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
-async def upload_product_photo(
-    product_id: str,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    admin_user: dict = Depends(get_current_admin_user)
-):
-    """
-    Mengunggah berkas gambar foto produk ke Supabase Storage (Khusus Admin).
-    Format yang didukung: JPEG, PNG, WebP (dicek dari isi berkas). Maksimum 5 MB (413 bila lebih).
-    Storage gagal -> 503/502; tidak ada fallback lokal.
-    """
+def _find_product_for_photo(db: Session, product_id: str):
     try:
-        product = db.query(Product).filter(Product.id == product_id).first()
+        return db.query(Product).filter(Product.id == product_id).first()
     except Exception:
         db.rollback()
-        product = None
+        return None
 
-    if not product:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Produk dengan ID '{product_id}' tidak ditemukan."
-        )
 
-    product.foto_url = await upload_image(file)
+def _save_product_photo(db: Session, product: Product, foto_url: str):
+    product.foto_url = foto_url
     try:
         db.commit()
         db.refresh(product)
@@ -299,3 +285,27 @@ async def upload_product_photo(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             log_prefix="Error saving product photo to database",
         )
+
+
+@router.post("/{product_id}/upload-photo", response_model=ProductOut, status_code=status.HTTP_200_OK)
+async def upload_product_photo(
+    product_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin_user: dict = Depends(get_current_admin_user)
+):
+    """
+    Mengunggah berkas gambar foto produk ke Supabase Storage (Khusus Admin).
+    Format yang didukung: JPEG, PNG, WebP (dicek dari isi berkas). Maksimum 5 MB (413 bila lebih).
+    Storage gagal -> 503/502; tidak ada fallback lokal.
+    """
+    # DB sinkron: jalankan di thread terpisah agar event loop tidak terblokir.
+    product = await run_in_threadpool(_find_product_for_photo, db, product_id)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Produk dengan ID '{product_id}' tidak ditemukan."
+        )
+
+    foto_url = await upload_image(file)
+    return await run_in_threadpool(_save_product_photo, db, product, foto_url)
