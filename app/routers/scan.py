@@ -58,7 +58,7 @@ class SimpleRateLimiter:
         self.requests[client_key] = [ts for ts in self.requests[client_key] if now - ts < self.window_seconds]
         if len(self.requests[client_key]) >= self.max_requests:
             retry_after = int(self.window_seconds - (now - self.requests[client_key][0]))
-            logger.warning(f"Rate limit exceeded for user: {client_key}")
+            logger.warning("Rate limit scan terlampaui")
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Terlalu banyak permintaan scan foto. Silakan coba lagi dalam {max(1, retry_after)} detik.",
@@ -120,7 +120,6 @@ async def scan_shelf_photo(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail="Ukuran file foto terlalu besar (maksimum 5 MB)."
             )
-        logger.info(f"Received file '{file.filename}' ({len(contents)} bytes) from user {user_id} for scanning.")
     except HTTPException:
         raise
     except Exception as e:
@@ -145,7 +144,18 @@ async def scan_shelf_photo(
             content_type = "image/jpeg"
 
     # 4. Memproses gambar melalui vision service (gpt-5.6-luna)
-    return await process_shelf_image(contents, content_type)
+    # Log hanya metrik tak-pribadi: tanpa user_id dan tanpa nama berkas unggahan.
+    started = time.monotonic()
+    try:
+        result = await process_shelf_image(contents, content_type)
+    except HTTPException as e:
+        logger.warning("scan gagal: status=%d bytes=%d durasi_ms=%d", e.status_code, len(contents), (time.monotonic() - started) * 1000)
+        raise
+    except Exception as e:
+        logger.error("scan gagal: error=%s bytes=%d durasi_ms=%d", type(e).__name__, len(contents), (time.monotonic() - started) * 1000)
+        raise
+    logger.info("scan selesai: status=200 items=%d bytes=%d durasi_ms=%d", len(result.detected), len(contents), (time.monotonic() - started) * 1000)
+    return result
 
 
 def _find_product_by_name(db: Session, clean_name: str) -> Optional[Product]:

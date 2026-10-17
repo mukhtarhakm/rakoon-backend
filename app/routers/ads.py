@@ -17,6 +17,7 @@ from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin_user, get_current_user_profile, get_user_identities
 from app.models.db_models import Store, StoreOwner, AdCampaign, PaymentTransaction, StoreSubmission
 from app.services import xendit_service
+from app.services.errors import exc_summary
 from app.routers.stores import haversine_distance
 from app.services.storage_upload import (
     CLAIM_PATH_RE,
@@ -53,7 +54,7 @@ def _get_user_latest_submission(user_id: str, db: Session) -> Optional[StoreSubm
             .first()
         )
     except Exception as e:
-        logger.warning(f"Error querying StoreSubmission table: {e}")
+        logger.warning(f"Error querying StoreSubmission table: {exc_summary(e)}")
         return None
 
 
@@ -466,7 +467,7 @@ def _reconcile_transaction_with_xendit(
         tx.updated_at = now
         db.commit()
     except Exception as e:
-        logger.warning(f"Error during Xendit payment reconciliation for {external_id}: {e}")
+        logger.warning(f"Error during Xendit payment reconciliation for {external_id}: {exc_summary(e)}")
         db.rollback()
 
     return False
@@ -828,7 +829,7 @@ def claim_store(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error in claim_store: {e}")
+        logger.error(f"Error in claim_store: {exc_summary(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Terjadi kesalahan pada server saat memproses klaim toko."
@@ -863,7 +864,7 @@ def get_pending_store_claims(
                 .all()
             )
         except Exception as e:
-            logger.warning(f"Error reading StoreSubmission table: {e}")
+            logger.warning(f"Error reading StoreSubmission table: {exc_summary(e)}")
 
     user_ids = [str(owner.user_id) for owner, _ in rows] + [str(sub.user_id) for sub in sub_rows]
     store_ids = [store.id for _, store in rows]
@@ -1169,7 +1170,7 @@ def submit_new_store(
         db.refresh(sub)
     except Exception as e:
         db.rollback()
-        logger.error(f"Error saving store submission: {e}")
+        logger.error(f"Error saving store submission: {exc_summary(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Gagal menyimpan pengajuan toko.")
 
     return UserSubmissionItem(
@@ -1256,7 +1257,7 @@ def get_my_submissions(
                     )
                 )
         except Exception as e:
-            logger.warning(f"Error querying StoreSubmission table: {e}")
+            logger.warning(f"Error querying StoreSubmission table: {exc_summary(e)}")
 
     items.sort(key=lambda x: x.created_at, reverse=True)
     return items
@@ -1399,7 +1400,7 @@ def verify_new_store_submission(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error in verify_new_store_submission: {e}")
+        logger.error(f"Error in verify_new_store_submission: {exc_summary(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Terjadi kesalahan pada server saat menyetujui toko baru.")
 
 
@@ -1439,7 +1440,7 @@ def reject_new_store_submission(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error in reject_new_store_submission: {e}")
+        logger.error(f"Error in reject_new_store_submission: {exc_summary(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Terjadi kesalahan pada server saat menolak pengajuan toko.")
 
 
@@ -2046,7 +2047,7 @@ def initiate_campaign_payment(
         )
     except Exception as e:
         db.rollback()
-        logger.error(f"Database error saving payment transaction: {e}")
+        logger.error(f"Database error saving payment transaction: {exc_summary(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error saving payment transaction"
@@ -2081,7 +2082,7 @@ def initiate_campaign_payment(
         db.commit()
     except Exception as e:
         db.rollback()
-        logger.error(f"Database error saving payment transaction: {e}")
+        logger.error(f"Database error saving payment transaction: {exc_summary(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error saving payment transaction"
@@ -2226,7 +2227,7 @@ def _process_xendit_webhook(payload: dict, db: Session):
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Database error committing webhook update: {e}")
+            logger.error(f"Database error committing webhook update: {exc_summary(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Database error processing webhook"
@@ -2243,7 +2244,7 @@ def _process_xendit_webhook(payload: dict, db: Session):
                 db.commit()
             except Exception as e:
                 db.rollback()
-                logger.error(f"Database error committing webhook update: {e}")
+                logger.error(f"Database error committing webhook update: {exc_summary(e)}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Database error processing webhook"
@@ -2258,7 +2259,7 @@ def _process_xendit_webhook(payload: dict, db: Session):
                 db.commit()
             except Exception as e:
                 db.rollback()
-                logger.error(f"Database error committing webhook update: {e}")
+                logger.error(f"Database error committing webhook update: {exc_summary(e)}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Database error processing webhook"
