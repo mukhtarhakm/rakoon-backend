@@ -32,6 +32,7 @@ from app.models.db_models import Product, PriceEntry, Store, ScanSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.services.errors import safe_error
+from app.services.storage_upload import read_upload, detect_content_type
 from app.routers.recommendation import canonical_unit
 from app.services.vision_service import process_shelf_image
 
@@ -68,7 +69,7 @@ class SimpleRateLimiter:
 
 
 scan_rate_limiter = SimpleRateLimiter(max_requests=10, window_seconds=60)
-MAX_SCAN_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_SCAN_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB, khusus scan; unggahan lain tetap 5 MB
 
 # Moderasi harga hasil konfirmasi (P5-02): harga di luar [0.3x, 3x] median harga terverifikasi produk
 # menjadi 'pending'. Median baru dipakai bila ada cukup sampel terverifikasi.
@@ -88,7 +89,7 @@ async def scan_shelf_photo(
     Menerima file foto rak (multipart/form-data) dan memprosesnya melalui
     AI Vision Pipeline menggunakan model gpt-5.6-luna (OpenAI). Wajib login.
     Dilindungi dengan rate limiter per pengguna (maks 10 scan/menit; IP dan X-Forwarded-For
-    tidak dipakai karena bisa dipalsukan) dan validasi ukuran file (maks 5 MB).
+    tidak dipakai karena bisa dipalsukan) dan validasi ukuran file (maks 10 MB).
     """
     # 0. Rate limiting per user_id (dari token terverifikasi)
     scan_rate_limiter.check(user_id)
@@ -107,41 +108,9 @@ async def scan_shelf_photo(
             detail="File yang diunggah bukan gambar yang didukung (gunakan JPG, JPEG, PNG, atau WEBP)."
         )
 
-    # 2. Membaca konten file foto dengan batasan ukuran 5 MB
-    try:
-        contents = await file.read()
-        if not contents:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="File foto yang diunggah kosong."
-            )
-        if len(contents) > MAX_SCAN_IMAGE_SIZE:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail="Ukuran file foto terlalu besar (maksimum 5 MB)."
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise safe_error(
-            logger,
-            e,
-            "Gagal membaca file foto.",
-            status_code=status.HTTP_400_BAD_REQUEST,
-            log_prefix="Error reading file content",
-        )
-
-    # 3. Menentukan MIME type
-    content_type = file.content_type
-    if not content_type or not content_type.startswith("image/"):
-        if ext in ('.jpg', '.jpeg'):
-            content_type = "image/jpeg"
-        elif ext == '.png':
-            content_type = "image/png"
-        elif ext == '.webp':
-            content_type = "image/webp"
-        else:
-            content_type = "image/jpeg"
+    # 2. Baca bertahap (413 bila > MAX_SCAN_IMAGE_BYTES, 400 bila kosong); tipe ditentukan dari magic bytes
+    contents = await read_upload(file, MAX_SCAN_IMAGE_BYTES)
+    content_type, _ = detect_content_type(contents)
 
     # 4. Memproses gambar melalui vision service (gpt-5.6-luna)
     # Log hanya metrik tak-pribadi: tanpa user_id dan tanpa nama berkas unggahan.

@@ -97,6 +97,11 @@ class TestAdsUploads(unittest.TestCase):
         self.assertEqual(self._post("/ads/upload-banner", b"<html>x</html>", "b.png").status_code, 400)
         self.assertEqual(self._post("/ads/upload-banner", BIG_PNG, "b.png").status_code, 413)
 
+    def test_banner_6mb_still_413_after_scan_limit_raise(self):
+        self._make_verified_owner()
+        png_6mb = b"\x89PNG\r\n\x1a\n" + b"\x00" * (6 * 1024 * 1024)
+        self.assertEqual(self._post("/ads/upload-banner", png_6mb, "b.png").status_code, 413)
+
     def test_banner_non_owner_still_forbidden(self):
         self.assertEqual(self._post("/ads/upload-banner", PNG, "banner.png").status_code, 403)
 

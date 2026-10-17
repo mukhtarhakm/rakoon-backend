@@ -299,13 +299,41 @@ class TestScanEndpoint(unittest.TestCase):
         self.assertIn("kosong", response.json()["detail"])
 
     def test_scan_file_too_large(self):
-        large_bytes = b"0" * (5 * 1024 * 1024 + 1)
+        large_bytes = b"\xff\xd8\xff\xe0" + b"0" * (10 * 1024 * 1024)
         response = self.client.post(
             "/scan/",
             files={"file": ("large.jpg", large_bytes, "image/jpeg")}
         )
         self.assertEqual(response.status_code, 413)
         self.assertIn("terlalu besar", response.json()["detail"])
+
+    def test_scan_accepts_6mb_jpeg(self):
+        big_jpeg = b"\xff\xd8\xff\xe0" + b"0" * (6 * 1024 * 1024)
+        with patch("app.routers.scan.process_shelf_image", new_callable=AsyncMock) as mock_vision:
+            mock_vision.return_value = ScanResponse(detected=[], message="ok", model_used="mock")
+            response = self.client.post("/scan/", files={"file": ("shelf.jpg", big_jpeg, "image/jpeg")})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mock_vision.await_args.args[0]), len(big_jpeg))
+        from app.routers.scan import MAX_SCAN_IMAGE_BYTES
+        self.assertEqual(MAX_SCAN_IMAGE_BYTES, 10 * 1024 * 1024)
+
+    def test_scan_rejects_non_image_bytes_named_jpg(self):
+        with patch("app.routers.scan.process_shelf_image", new_callable=AsyncMock) as mock_vision:
+            mock_vision.return_value = ScanResponse(detected=[], message="ok", model_used="mock")
+            response = self.client.post("/scan/", files={"file": ("x.jpg", b"<html>x</html>", "image/jpeg")})
+        self.assertEqual(response.status_code, 400)
+        mock_vision.assert_not_called()
+
+    def test_scan_log_keeps_bytes_and_duration(self):
+        jpeg = b"\xff\xd8\xff\xe0fake"
+        with patch("app.routers.scan.process_shelf_image", new_callable=AsyncMock) as mock_vision:
+            mock_vision.return_value = ScanResponse(detected=[], message="ok", model_used="mock")
+            with self.assertLogs("rakoon_backend.scan", level="INFO") as logs:
+                self.client.post("/scan/", files={"file": ("shelf.jpg", jpeg, "image/jpeg")})
+        line = next(m for m in logs.output if "scan selesai" in m)
+        self.assertIn(f"bytes={len(jpeg)}", line)
+        self.assertIn("durasi_ms=", line)
+        self.assertNotIn(USER_A, line)
 
     def test_scan_requires_login_and_never_calls_vision_without_token(self):
         app.dependency_overrides.pop(get_current_user, None)
