@@ -1455,7 +1455,7 @@ async def upload_claim_document(
     """
     contents = await read_upload(file)
     content_type, ext = detect_claim_evidence_type(contents, "documents")
-    return {"document_path": store_private(contents, content_type, ext, "documents", user_id)}
+    return {"document_path": await run_in_threadpool(store_private, contents, content_type, ext, "documents", user_id)}
 
 
 @router.post("/upload-claim-photo", status_code=status.HTTP_200_OK)
@@ -1469,7 +1469,7 @@ async def upload_claim_photo(
     """
     contents = await read_upload(file)
     content_type, ext = detect_claim_evidence_type(contents, "photos")
-    return {"photo_path": store_private(contents, content_type, ext, "photos", user_id)}
+    return {"photo_path": await run_in_threadpool(store_private, contents, content_type, ext, "photos", user_id)}
 
 
 @router.get("/documents/{filename}")

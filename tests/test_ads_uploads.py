@@ -124,6 +124,30 @@ class TestAdsUploads(unittest.TestCase):
         self.assertTrue(loop_threads and db_threads)
         self.assertTrue(db_threads.isdisjoint(loop_threads))
 
+    def test_banner_storage_call_runs_off_event_loop_thread(self):
+        import threading
+        from app.routers import ads
+
+        self._make_verified_owner()
+        loop_threads, storage_threads = set(), set()
+        real_upload = ads.upload_image
+
+        async def upload(*args, **kwargs):
+            loop_threads.add(threading.get_ident())
+            return await real_upload(*args, **kwargs)
+
+        def storage_upload(*args, **kwargs):
+            storage_threads.add(threading.get_ident())
+
+        self.bucket.upload.side_effect = storage_upload
+        with patch.object(ads, "upload_image", upload):
+            res = self._post("/ads/upload-banner", PNG, "banner.png")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(loop_threads and storage_threads)
+        self.assertTrue(storage_threads.isdisjoint(loop_threads))
+
+
 
 if __name__ == "__main__":
     unittest.main()

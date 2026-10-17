@@ -8,6 +8,7 @@ import uuid
 from typing import Optional, Tuple
 
 from fastapi import HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 
 from app.database import supabase
 
@@ -84,7 +85,8 @@ def store_public(contents: bytes, content_type: str, ext: str, prefix: str = "")
 async def upload_image(file: UploadFile, prefix: str = "") -> str:
     contents = await read_upload(file)
     content_type, ext = detect_content_type(contents)
-    return store_public(contents, content_type, ext, prefix)
+    # Klien supabase sinkron: jalankan di thread terpisah agar event loop tidak terblokir.
+    return await run_in_threadpool(store_public, contents, content_type, ext, prefix)
 
 
 # ---- Bukti klaim (dokumen legalitas + foto toko): bucket PRIVAT, hanya PDF/JPEG ----

@@ -251,6 +251,29 @@ class TestAdminSignedUrl(ClaimEvidenceBase):
         self.assertEqual(res.status_code, 503)
         self.assertNotIn("boom", res.text)
 
+    def test_private_storage_call_runs_off_event_loop_thread(self):
+        import threading
+        from app.routers import ads
+
+        loop_threads, storage_threads = set(), set()
+        real_read = ads.read_upload
+
+        async def read_upload(*args, **kwargs):
+            loop_threads.add(threading.get_ident())
+            return await real_read(*args, **kwargs)
+
+        def storage_upload(*args, **kwargs):
+            storage_threads.add(threading.get_ident())
+
+        self.bucket.upload.side_effect = storage_upload
+        with patch.object(ads, "read_upload", read_upload):
+            self.assertEqual(self._post("/ads/upload-claim-document", PDF, "nib.pdf", "application/pdf").status_code, 200)
+            self.assertEqual(self._post("/ads/upload-claim-photo", JPEG, "toko.jpg", "image/jpeg").status_code, 200)
+
+        self.assertTrue(loop_threads and storage_threads)
+        self.assertTrue(storage_threads.isdisjoint(loop_threads))
+
+
 
 if __name__ == "__main__":
     unittest.main()
