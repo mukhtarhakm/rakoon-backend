@@ -100,6 +100,30 @@ class TestAdsUploads(unittest.TestCase):
     def test_banner_non_owner_still_forbidden(self):
         self.assertEqual(self._post("/ads/upload-banner", PNG, "banner.png").status_code, 403)
 
+    def test_banner_owner_query_runs_off_event_loop_thread(self):
+        import threading
+        from sqlalchemy.orm import Session
+        from app.routers import ads
+
+        self._make_verified_owner()
+        loop_threads, db_threads = set(), set()
+        real_upload, real_query = ads.upload_image, Session.query
+
+        async def upload(*args, **kwargs):
+            loop_threads.add(threading.get_ident())
+            return await real_upload(*args, **kwargs)
+
+        def query(session, *args, **kwargs):
+            db_threads.add(threading.get_ident())
+            return real_query(session, *args, **kwargs)
+
+        with patch.object(ads, "upload_image", upload), patch.object(Session, "query", query):
+            res = self._post("/ads/upload-banner", PNG, "banner.png")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(loop_threads and db_threads)
+        self.assertTrue(db_threads.isdisjoint(loop_threads))
+
 
 if __name__ == "__main__":
     unittest.main()

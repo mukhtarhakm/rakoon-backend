@@ -1517,15 +1517,7 @@ def get_claim_evidence_url(
     return {"url": url, "expires_in": CLAIM_SIGNED_URL_TTL_SECONDS}
 
 
-@router.post("/upload-banner", status_code=status.HTTP_200_OK)
-async def upload_ad_banner(
-    file: UploadFile = File(...),
-    user_id: str = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Mengunggah berkas foto flyer iklan promo ke Supabase Storage. Storage gagal -> 502/503.
-    """
+def _require_verified_owner_for_banner(db: Session, user_id: str) -> None:
     owner = (
         db.query(StoreOwner)
         .filter(
@@ -1540,6 +1532,19 @@ async def upload_ad_banner(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Hanya pemilik toko terverifikasi yang dapat mengunggah banner iklan."
         )
+
+
+@router.post("/upload-banner", status_code=status.HTTP_200_OK)
+async def upload_ad_banner(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mengunggah berkas foto flyer iklan promo ke Supabase Storage. Storage gagal -> 502/503.
+    """
+    # DB sinkron: jalankan di thread terpisah agar event loop tidak terblokir.
+    await run_in_threadpool(_require_verified_owner_for_banner, db, user_id)
 
     banner_url = await upload_image(file, prefix="ad_")
     return {"banner_url": banner_url}
