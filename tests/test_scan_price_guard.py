@@ -130,10 +130,10 @@ class TestConfirmPriceBand(unittest.TestCase):
         self._confirm(product.nama, 9000)
         self.assertEqual(self._last_status(product, 9000), VerificationStatus.VERIFIED)
         # suntikan murah berulang tidak menggeser median sehingga tetap pending
-        for _ in range(3):
-            self._confirm(product.nama, 2000)
+        for harga in (2000, 2001, 2002):  # harga berbeda: kiriman identik dalam 10 menit dilewati
+            self._confirm(product.nama, harga)
         self.db.expire_all()
-        injected = self.db.query(PriceEntry).filter(PriceEntry.harga == 2000).all()
+        injected = self.db.query(PriceEntry).filter(PriceEntry.harga.in_((2000, 2001, 2002))).all()
         self.assertEqual(len(injected), 3)
         self.assertEqual({e.status_verifikasi for e in injected}, {VerificationStatus.PENDING})
 
@@ -151,11 +151,13 @@ class TestConfirmPriceBand(unittest.TestCase):
     def test_daily_quota_blocks_the_whole_request_and_is_per_user(self):
         product = self._seed_product()
         with patch("app.routers.scan.DAILY_CONFIRM_ITEM_QUOTA", 5):
+            prices = iter(range(11000, 12000))  # harga unik per item: entri kembar dilewati dan tidak memakai kuota
+
             def confirm_many(n, user):
                 self.current_user = user
                 return self.client.post("/scan/confirm", json={
                     "store_id": self.store_id, "user_id": "x",
-                    "items": [{"nama_produk": product.nama, "harga": 11000, "kategori": "Makanan Pokok"}] * n,
+                    "items": [{"nama_produk": product.nama, "harga": next(prices), "kategori": "Makanan Pokok"} for _ in range(n)],
                 })
 
             self.assertEqual(confirm_many(3, USER_A).status_code, 201)

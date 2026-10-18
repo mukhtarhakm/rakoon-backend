@@ -6,7 +6,7 @@ import time
 import logging
 import statistics
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Union
 from uuid import UUID
 
@@ -78,6 +78,8 @@ PRICE_BAND_HIGH_FACTOR = 3.0
 PRICE_BAND_MIN_SAMPLES = 3
 # Jumlah entri harga yang boleh dikonfirmasi satu pengguna per hari (UTC).
 DAILY_CONFIRM_ITEM_QUOTA = 200
+# Entri (produk, toko, harga) yang sama dari pengguna yang sama dalam jendela ini dianggap kiriman ulang dan dilewati.
+DUPLICATE_ENTRY_WINDOW = timedelta(minutes=10)
 
 
 @router.post("/", response_model=ScanResponse, status_code=status.HTTP_200_OK)
@@ -202,20 +204,22 @@ def _price_status(db: Session, product_id, harga: int) -> VerificationStatus:
     return VerificationStatus.PENDING
 
 
-def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> ConfirmResponse:
-    items_saved = 0
+def _quota_exceeded() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"Kuota konfirmasi harian tercapai (maksimum {DAILY_CONFIRM_ITEM_QUOTA} entri harga per hari). Coba lagi besok.",
+    )
+
+
+def _save_confirmation(db: Session, user_id: str, store_id: str, items, used_today: int = 0) -> ConfirmResponse:
     products_created = 0
     items_pending = 0
+    items_skipped = 0
 
     now_utc = datetime.now(timezone.utc)
-    # 1. Buat satu scan_session untuk batch konfirmasi ini
-    scan_session = ScanSession(
-        user_id=user_id,
-        store_id=store_id,
-        created_at=now_utc
-    )
-    db.add(scan_session)
-    db.flush() # Flush untuk mendapatkan generated ID scan_session
+    window_start = now_utc - DUPLICATE_ENTRY_WINDOW
+    to_save = []  # (product_id, harga, status)
+    seen = set()
 
     for item in items:
         product, created = _resolve_product(db, item.nama_produk.strip(), item)
@@ -223,33 +227,59 @@ def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> Confi
         if created:
             products_created += 1
 
-        # Insert ke tabel price_entries untuk tiap item dengan scan_session_id
+        # Entri kembar: sama dalam request ini, atau sudah disimpan pengguna yang sama untuk toko ini dalam 10 menit terakhir.
+        key = (product_id, item.harga)
+        if key in seen or (not created and db.query(PriceEntry.id).filter(
+            PriceEntry.product_id == product_id,
+            PriceEntry.store_id == store_id,
+            PriceEntry.harga == item.harga,
+            PriceEntry.sumber_user_id == user_id,
+            PriceEntry.timestamp >= window_start,
+        ).first()):
+            items_skipped += 1
+            continue
+        seen.add(key)
+
         entry_status = _price_status(db, product_id, item.harga)
         if entry_status == VerificationStatus.PENDING:
             items_pending += 1
-        db.add(PriceEntry(
-            product_id=product_id,
-            store_id=store_id,
-            harga=item.harga,
-            sumber_user_id=user_id,
-            status_verifikasi=entry_status,
-            scan_session_id=scan_session.id,
-            timestamp=now_utc
-        ))
-        items_saved += 1
+        to_save.append((product_id, item.harga, entry_status))
+
+    # Kuota dihitung dari entri yang benar-benar disimpan; melewati batas menolak seluruh permintaan (rollback oleh pemanggil).
+    if used_today + len(to_save) > DAILY_CONFIRM_ITEM_QUOTA:
+        raise _quota_exceeded()
+
+    # Satu scan_session untuk batch ini; tidak dibuat bila semua item dilewati (tidak ada sesi kosong).
+    scan_session = None
+    if to_save:
+        scan_session = ScanSession(user_id=user_id, store_id=store_id, created_at=now_utc)
+        db.add(scan_session)
+        db.flush() # Flush untuk mendapatkan generated ID scan_session
+        for product_id, harga, entry_status in to_save:
+            db.add(PriceEntry(
+                product_id=product_id,
+                store_id=store_id,
+                harga=harga,
+                sumber_user_id=user_id,
+                status_verifikasi=entry_status,
+                scan_session_id=scan_session.id,
+                timestamp=now_utc
+            ))
 
     # Commit seluruh perubahan sekaligus secara atomic
     db.commit()
 
-    message = f"Berhasil menyimpan {items_saved} entri harga. Membuat {products_created} produk baru."
+    message = f"Berhasil menyimpan {len(to_save)} entri harga. Membuat {products_created} produk baru."
     if items_pending:
         message += f" {items_pending} entri menunggu verifikasi karena harga di luar kisaran wajar."
+    if items_skipped:
+        message += f" {items_skipped} entri kembar dilewati."
     return ConfirmResponse(
-        items_saved=items_saved,
+        items_saved=len(to_save),
         products_created=products_created,
         items_pending_review=items_pending,
         message=message,
-        scan_session_id=str(scan_session.id)
+        scan_session_id=str(scan_session.id) if scan_session else None
     )
 
 
@@ -266,6 +296,8 @@ def confirm_scan_results(
     berbeda dari produk yang ada, harga masuk ke produk varian "{nama} ({ukuran}{satuan})". Balapan nama produk (IntegrityError) diulang sekali
     sehingga produk yang baru dibuat pihak lain dipakai, bukan 500.
     Setiap entri harga disimpan ke tabel 'price_entries' yang diasosiasikan dengan satu 'scan_sessions'.
+    Entri kembar (produk, toko, harga sama) dalam satu request, atau dari pengguna yang sama dalam 10 menit terakhir,
+    hanya disimpan sekali dan tidak dihitung ke kuota harian.
     """
     try:
         store_id = str(UUID(str(request_data.store_id)))
@@ -301,15 +333,10 @@ def confirm_scan_results(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             log_prefix="Error checking daily confirm quota",
         )
-    if used_today + len(request_data.items) > DAILY_CONFIRM_ITEM_QUOTA:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Kuota konfirmasi harian tercapai (maksimum {DAILY_CONFIRM_ITEM_QUOTA} entri harga per hari). Coba lagi besok.",
-        )
 
     for attempt in (1, 2):
         try:
-            return _save_confirmation(db, user_id, store_id, request_data.items)
+            return _save_confirmation(db, user_id, store_id, request_data.items, used_today)
         except IntegrityError as e:
             db.rollback()
             if attempt == 2:
@@ -320,6 +347,9 @@ def confirm_scan_results(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     log_prefix="Integrity error during scan confirmation",
                 )
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception as e:
             db.rollback()
             raise safe_error(
