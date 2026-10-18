@@ -33,7 +33,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.services.errors import safe_error
 from app.services.storage_upload import read_upload, detect_content_type
-from app.routers.recommendation import canonical_unit
+from app.routers.recommendation import canonical_unit, normalize_unit_and_dimension
 from app.services.vision_service import process_shelf_image
 
 
@@ -132,6 +132,60 @@ def _find_product_by_name(db: Session, clean_name: str) -> Optional[Product]:
     return db.query(Product).filter(func.lower(Product.nama) == clean_name.lower()).first()
 
 
+_SIZE_SUFFIX_RE = re.compile(r"\s*\(\s*\d+(?:[.,]\d+)?\s*[A-Za-z]+\s*\)\s*$")
+
+
+def _size_key(ukuran, satuan):
+    """(satuan dasar, ukuran dalam satuan dasar) untuk perbandingan ukuran; None bila ukuran/satuan kosong atau satuan tak dikenal."""
+    if ukuran is None or ukuran <= 0 or not satuan:
+        return None
+    normalized = normalize_unit_and_dimension(satuan, ukuran)
+    if not normalized:
+        return None
+    _dimension, base_unit, value = normalized
+    return base_unit, round(value, 3)
+
+
+def _variant_name(clean_name: str, size_key) -> str:
+    """'{nama} ({ukuran}{satuan})' dalam satuan dasar, mis. 'Ultra Milk Cokelat (200ml)'; sufiks ukuran lama pada nama dibuang dulu."""
+    base_unit, value = size_key
+    number = format(value, "f").rstrip("0").rstrip(".")
+    return f"{_SIZE_SUFFIX_RE.sub('', clean_name)} ({number}{base_unit})"
+
+
+def _resolve_product(db: Session, clean_name: str, item):
+    """Produk untuk item konfirmasi dan True bila dibuat baru. Nama yang sama tetapi ukuran berbeda masuk ke produk varian."""
+    product = None
+    # Cek di session's new objects terlebih dahulu untuk menghindari duplikasi dalam batch yang sama
+    for obj in db.new:
+        if isinstance(obj, Product) and obj.nama.lower() == clean_name.lower():
+            product = obj
+            break
+    if not product:
+        product = _find_product_by_name(db, clean_name)
+
+    kategori = item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
+    if product:
+        item_size, product_size = _size_key(item.ukuran, item.satuan), _size_key(product.ukuran, product.satuan)
+        if item_size and product_size and item_size != product_size:
+            variant_name = _variant_name(clean_name, item_size)
+            product = _find_product_by_name(db, variant_name)
+            if not product:
+                product = Product(nama=variant_name, ukuran=item.ukuran, satuan=canonical_unit(item.satuan), kategori=kategori)
+                db.add(product)
+                db.flush()  # IntegrityError bila varian baru saja dibuat pihak lain; confirm_scan_results mengulang dan memakainya
+                return product, True
+        # Update category only if the existing category is legacy "General"
+        if product.kategori.strip().lower() == "general":
+            product.kategori = kategori
+        return product, False
+
+    product = Product(nama=clean_name, ukuran=item.ukuran, satuan=canonical_unit(item.satuan), kategori=kategori)
+    db.add(product)
+    db.flush()  # Flush untuk mendapatkan generated ID dari database
+    return product, True
+
+
 def _price_status(db: Session, product_id, harga: int) -> VerificationStatus:
     """VERIFIED bila harga dalam pita wajar median harga terverifikasi produk, selain itu PENDING."""
     samples = [
@@ -164,35 +218,9 @@ def _save_confirmation(db: Session, user_id: str, store_id: str, items) -> Confi
     db.flush() # Flush untuk mendapatkan generated ID scan_session
 
     for item in items:
-        clean_name = item.nama_produk.strip()
-
-        # Cek di session's new objects terlebih dahulu untuk menghindari duplikasi dalam batch yang sama
-        product = None
-        for obj in db.new:
-            if isinstance(obj, Product) and obj.nama.lower() == clean_name.lower():
-                product = obj
-                break
-
-        if not product:
-            product = _find_product_by_name(db, clean_name)
-
-        if product:
-            # Produk sudah ada, ambil product_id-nya
-            product_id = product.id
-            # Update category only if the existing category is legacy "General"
-            if product.kategori.strip().lower() == "general":
-                product.kategori = item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
-        else:
-            # Produk belum ada, buat produk baru
-            new_product = Product(
-                nama=clean_name,
-                ukuran=item.ukuran,
-                satuan=canonical_unit(item.satuan),
-                kategori=item.kategori.value if isinstance(item.kategori, ProductCategory) else item.kategori
-            )
-            db.add(new_product)
-            db.flush() # Flush untuk mendapatkan generated ID dari database
-            product_id = new_product.id
+        product, created = _resolve_product(db, item.nama_produk.strip(), item)
+        product_id = product.id
+        if created:
             products_created += 1
 
         # Insert ke tabel price_entries untuk tiap item dengan scan_session_id
@@ -234,7 +262,8 @@ def confirm_scan_results(
     """
     Menyimpan hasil scan produk ke database setelah dikonfirmasi atau dikoreksi oleh user di frontend.
     Toko harus ada (404 bila tidak). Jika produk belum terdaftar di tabel 'products' (nama sama persis,
-    tanpa beda huruf besar/kecil), produk baru dibuat. Balapan nama produk (IntegrityError) diulang sekali
+    tanpa beda huruf besar/kecil), produk baru dibuat. Bila nama cocok tetapi ukuran (setelah normalisasi satuan)
+    berbeda dari produk yang ada, harga masuk ke produk varian "{nama} ({ukuran}{satuan})". Balapan nama produk (IntegrityError) diulang sekali
     sehingga produk yang baru dibuat pihak lain dipakai, bukan 500.
     Setiap entri harga disimpan ke tabel 'price_entries' yang diasosiasikan dengan satu 'scan_sessions'.
     """
