@@ -279,7 +279,7 @@ def get_price_comparison(
     product_id: str,
     lat: float = Query(..., ge=-90, le=90, description="Latitude koordinat pengguna"),
     lng: float = Query(..., ge=-180, le=180, description="Longitude koordinat pengguna"),
-    radius_km: float = Query(5.0, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian dalam kilometer"),
+    radius_km: Optional[float] = Query(None, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian (km). Kosong = semua toko"),
     db: Session = Depends(get_db)
 ):
     """

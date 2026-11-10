@@ -111,20 +111,23 @@ MAX_SEARCH_RADIUS_KM = 100.0
 def get_nearby_stores(
     lat: float = Query(..., ge=-90, le=90, description="Latitude koordinat pengguna"),
     lng: float = Query(..., ge=-180, le=180, description="Longitude koordinat pengguna"),
-    radius_km: float = Query(5.0, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian dalam kilometer"),
+    radius_km: Optional[float] = Query(None, gt=0, le=MAX_SEARCH_RADIUS_KM, description="Radius pencarian (km). Kosong = tanpa batas, semua toko terurut dari terdekat"),
     db: Session = Depends(get_db)
 ):
     """
-    Mencari toko/supermarket terdekat dalam radius tertentu dari koordinat lat/lng
-    dengan melakukan query langsung ke database lokal.
+    Mencari toko/supermarket dari koordinat lat/lng, terurut dari yang terdekat.
+    Tanpa radius_km: semua toko dikembalikan. Dengan radius_km: hanya toko dalam radius itu.
     """
-    # Ambil toko kandidat dari database lokal
-    db_stores = get_candidate_stores(db, lat, lng, radius_km)
-    
+    # shortcut: tanpa radius membaca semua toko lalu Haversine di Python, ganti ke batas/paginasi bila toko mencapai ribuan
+    if radius_km is None:
+        db_stores = db.query(Store).all()
+    else:
+        db_stores = get_candidate_stores(db, lat, lng, radius_km)
+
     candidate_matches = []
     for store in db_stores:
         dist = haversine_distance(lat, lng, store.lat, store.lng)
-        if dist <= radius_km:
+        if radius_km is None or dist <= radius_km:
             candidate_matches.append((store, dist))
 
     # Agregasi jumlah produk dengan harga tercatat per toko
@@ -159,9 +162,9 @@ def get_nearby_stores(
     # Urutkan hasil berdasarkan jarak terdekat
     results.sort(key=lambda x: x.jarak_km)
     
-    # Cek jika data toko kurang dari 2
+    # Mode radius: kurang dari 2 toko = terbatas. Tanpa radius: pesan hanya bila tidak ada toko sama sekali.
     message = None
-    if len(results) < 2:
+    if len(results) < (2 if radius_km is not None else 1):
         message = "Data toko di sekitar masih terbatas"
         
     return NearbyStoresResponse(

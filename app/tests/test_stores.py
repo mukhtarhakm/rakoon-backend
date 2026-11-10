@@ -157,6 +157,59 @@ class TestStores(unittest.TestCase):
         self.assertEqual(len(data["stores"]), 2)
         self.assertIsNone(data["message"])
 
+    def _add_stores_near_and_far(self):
+        db = TestingSessionLocal()
+        db.add_all([
+            Store(id="a5b07384-d113-4956-b51c-43f11075d661", nama="Toko Dekat", lat=-6.2088, lng=106.8546, alamat="d"),
+            Store(id="a5b07384-d113-4956-b51c-43f11075d662", nama="Toko Sedang", lat=-6.2088, lng=106.9356, alamat="s"),
+            # ~ Surabaya: >600 km dari titik pengguna
+            Store(id="a5b07384-d113-4956-b51c-43f11075d663", nama="Toko Sangat Jauh", lat=-7.25, lng=112.75, alamat="j"),
+        ])
+        db.commit()
+        db.close()
+
+    def test_nearby_without_radius_returns_all_sorted_by_distance(self):
+        self._add_stores_near_and_far()
+        response = self.client.get("/stores/nearby?lat=-6.2088&lng=106.8456")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual([s["nama"] for s in data["stores"]], ["Toko Dekat", "Toko Sedang", "Toko Sangat Jauh"])
+        jarak = [s["jarak_km"] for s in data["stores"]]
+        self.assertEqual(jarak, sorted(jarak))
+        self.assertGreater(jarak[-1], 600)
+        self.assertIsNone(data["message"])
+
+    def test_nearby_without_radius_single_store_has_no_limited_message(self):
+        db = TestingSessionLocal()
+        db.add(Store(id="a5b07384-d113-4956-b51c-43f11075d664", nama="Satu-satunya", lat=-7.25, lng=112.75, alamat="x"))
+        db.commit()
+        db.close()
+        data = self.client.get("/stores/nearby?lat=-6.2088&lng=106.8456").json()
+        self.assertEqual(len(data["stores"]), 1)
+        self.assertIsNone(data["message"])
+
+    def test_nearby_with_radius_keeps_filter(self):
+        self._add_stores_near_and_far()
+        data = self.client.get("/stores/nearby?lat=-6.2088&lng=106.8456&radius_km=5").json()
+        self.assertEqual([s["nama"] for s in data["stores"]], ["Toko Dekat"])
+        data = self.client.get("/stores/nearby?lat=-6.2088&lng=106.8456&radius_km=10").json()
+        self.assertEqual([s["nama"] for s in data["stores"]], ["Toko Dekat", "Toko Sedang"])
+
+    def test_nearby_without_radius_no_stores_at_all(self):
+        data = self.client.get("/stores/nearby?lat=-6.2088&lng=106.8456").json()
+        self.assertEqual(data["stores"], [])
+        self.assertEqual(data["message"], "Data toko di sekitar masih terbatas")
+
+    def test_price_compare_without_radius_includes_far_store(self):
+        self._add_stores_near_and_far()
+        db = TestingSessionLocal()
+        db.add(Product(id="d3b07384-d113-4956-b51c-43f11075d699", nama="Susu", kategori="Minuman", ukuran=1000.0, satuan="ml"))
+        db.commit()
+        db.close()
+        res = self.client.get("/price/compare/d3b07384-d113-4956-b51c-43f11075d699?lat=-6.2088&lng=106.8456")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.json()["comparison"]), 3)
+
     def test_price_comparison_integration(self):
         from app.models.db_models import Product, PriceEntry
         # Insert a product and a store and price entry
